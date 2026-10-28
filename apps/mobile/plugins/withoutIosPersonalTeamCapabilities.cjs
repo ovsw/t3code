@@ -5,6 +5,8 @@ module.exports = function withoutIosPersonalTeamCapabilities(config) {
     delete modConfig.modResults["aps-environment"];
     delete modConfig.modResults["com.apple.developer.applesignin"];
     delete modConfig.modResults["com.apple.security.application-groups"];
+    // Personal teams cannot sign Associated Domains either.
+    delete modConfig.modResults["com.apple.developer.associated-domains"];
     return modConfig;
   });
 };

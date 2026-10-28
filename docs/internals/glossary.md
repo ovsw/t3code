@@ -62,3 +62,14 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
 | Attachment inventory | The ordered image records shown as thumbnails above the prose, including images with no inline references.                          |
 
 See [composer context references](./composer-context-references.md) for the contract and lifecycle.
+
+## Walk mode
+
+| Term          | Meaning                                                                                                                                         |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Walk mode     | A hands-free session on one thread: the phone speaks each agent reply in headphones and the user answers by voice, driven by headphone presses. |
+| Gesture       | One, two, or three consecutive headphone presses. One toggles pause, two toggles recording, three sends.                                        |
+| Reply         | The agent's final text of one completed turn, as spoken. Code blocks, tool activity, and diffs are not part of it.                              |
+| Draft         | The thread's ordinary composer draft. Each transcribed recording is appended to it; a send sends it as one user message.                        |
+| Keep-alive    | A silent audio track that plays during Walk mode so iOS keeps routing headphone presses to the app while speech is paused.                      |
+| Thinking tone | A low repeating sound played while the agent's turn runs and no reply is ready.                                                                 |
