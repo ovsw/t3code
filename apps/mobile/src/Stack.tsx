@@ -1,6 +1,5 @@
 import { isDraftThreadRoute } from "./features/threads/thread-route-state";
 import { ComponentCatalogScreen } from "./features/development/ComponentCatalogScreen";
-import { WalkModeSpikeScreen } from "./features/development/WalkModeSpikeScreen";
 import { PullRequestGuideStopScreen } from "./features/pull-requests/guide/PullRequestGuideScreen";
 import { PullRequestInlineCommentScreen } from "./features/pull-requests/PullRequestInlineCommentScreen";
 import { PullRequestDiscussionScreen } from "./features/pull-requests/PullRequestDiscussionScreen";
@@ -608,12 +607,6 @@ const RootStackConfig = createWorkspaceStackNavigator({
           }),
         }
       : {}),
-    // Spike: registered in every build so a self-contained Release build can open it.
-    SettingsWalkModeSpike: createNativeStackScreen({
-      screen: WalkModeSpikeScreen,
-      linking: "dev/walk-mode",
-      options: { ...SETTINGS_PAGE_OPTIONS, title: "Walk mode spike" },
-    }),
     Home: createNativeStackScreen({
       screen: WorkspaceRootScreen,
       linking: "",

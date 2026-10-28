@@ -63,7 +63,8 @@ function fakeAudio(options: FakeAudioOptions = {}) {
     enqueue: record("enqueue"),
     pause: record("pause"),
     resume: record("resume"),
-    stop: record("stop"),
+    announce: record("announce"),
+    shutdown: record("shutdown"),
     setKeepAlive: record("setKeepAlive"),
     setNowPlayingTitle: record("setNowPlayingTitle"),
     hasWiredInput: async () => options.wiredInput ?? false,
@@ -99,6 +100,7 @@ function fakeAudio(options: FakeAudioOptions = {}) {
     take: () => calls.splice(0),
     press: (presses: 1 | 2 | 3) => emit({ type: "gesture", presses }),
     callAction: (action: string) => emit({ type: "call-action", action }),
+    headphones: (connected: boolean) => emit({ type: "route", headphones: connected }),
     /** Waits until an untaken call matches. */
     until: (...expected: AudioCall) =>
       changed.until(() => calls.some((call) => JSON.stringify(call) === JSON.stringify(expected))),
@@ -157,6 +159,7 @@ type SessionOptions = FakeAudioOptions & {
   /** Transcripts returned in order; an Error makes that transcription fail. */
   readonly transcripts?: ReadonlyArray<string | Error>;
   readonly sendFails?: boolean;
+  readonly offline?: boolean;
 };
 
 async function startSession(initial: WalkModeTurns | null, options: SessionOptions = {}) {
@@ -165,6 +168,7 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
   const draft = { text: options.draft ?? "" };
   const transcripts = [...(options.transcripts ?? ["transcript"])];
   const sent: string[] = [];
+  const connection = { connected: !options.offline, listeners: new Set<() => void>() };
   const session = new WalkModeSession({
     turns: turns.stream,
     draft: {
@@ -191,6 +195,13 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
         },
       }),
     },
+    connection: {
+      read: () => connection.connected,
+      subscribe: (onChange) => {
+        connection.listeners.add(onChange);
+        return () => connection.listeners.delete(onChange);
+      },
+    },
   });
   await session.start();
   return {
@@ -199,6 +210,10 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
     turns,
     draft,
     sent,
+    setConnected: (connected: boolean) => {
+      connection.connected = connected;
+      for (const listener of connection.listeners) listener();
+    },
     /** Waits until the session leaves recording and transcribing. */
     rested: () =>
       new Promise<void>((resolve) => {
@@ -242,11 +257,27 @@ describe("WalkModeSession: start and stop", () => {
     audio.press(1);
     audio.take();
     session.stop();
-    expect(audio.take()).toEqual([["stop"], ["setKeepAlive", false]]);
+    expect(audio.take()).toEqual([["shutdown"]]);
     expect(session.status).toBe("idle");
     expect(audio.listenerCount()).toBe(0);
     turns.set(thread([latest, turn("run-3", 3, "completed", "Too late.")]));
     expect(audio.take()).toEqual([]);
+  });
+
+  it("starts again after a stop, silent, with the latest reply paused", async () => {
+    const { session, audio } = await startSession(thread([latest]));
+    audio.press(1);
+    session.stop();
+    audio.take();
+    await session.start();
+    expect(audio.take()).toEqual([
+      ["configureSession"],
+      ["setKeepAlive", true],
+      ["setNowPlayingTitle", "Fix the login bug"],
+    ]);
+    expect(session.status).toBe("paused");
+    audio.press(1);
+    expect(audio.take()).toEqual([["speak", ["The login works now.", "Try it again."]]]);
   });
 
   it("shows a renamed thread's new title on the now-playing card", async () => {
@@ -512,6 +543,7 @@ describe("WalkModeSession: recording", () => {
       ["playSound", "tick"],
       ["stopRecording"],
       ["playSound", "error"],
+      ["announce", "Transcription failed, recording dropped."],
     ]);
     expect(draft.text).toBe("Keep me.");
     expect(session.status).toBe("idle");
@@ -540,7 +572,7 @@ describe("WalkModeSession: recording", () => {
     audio.take();
     session.stop();
     await audio.until("stopRecording");
-    expect(audio.take()).toEqual([["stop"], ["setKeepAlive", false], ["stopRecording"]]);
+    expect(audio.take()).toEqual([["shutdown"], ["stopRecording"]]);
   });
 });
 
@@ -579,12 +611,44 @@ describe("WalkModeSession: sending", () => {
     expect(sent).toEqual([]);
   });
 
-  it("a failed send plays the error sound and keeps the draft", async () => {
+  it("a failed send says so and keeps the draft", async () => {
     const { audio, draft } = await startSession(thread([]), { draft: "Keep me.", sendFails: true });
     audio.take();
     audio.press(3);
-    await audio.until("playSound", "error");
+    await audio.until("announce", "Send failed, your draft is kept.");
+    expect(audio.take()).toEqual([
+      ["playSound", "error"],
+      ["announce", "Send failed, your draft is kept."],
+    ]);
     expect(draft.text).toBe("Keep me.");
+  });
+
+  it("a send while the server is unreachable says so, sends nothing, and keeps the draft", async () => {
+    const { audio, draft, sent } = await startSession(thread([]), {
+      draft: "Keep me.",
+      offline: true,
+    });
+    audio.take();
+    audio.press(3);
+    expect(audio.take()).toEqual([
+      ["playSound", "error"],
+      ["announce", "Server unreachable, your draft is kept."],
+    ]);
+    expect(sent).toEqual([]);
+    expect(draft.text).toBe("Keep me.");
+  });
+
+  it("says once when the server becomes unreachable", async () => {
+    const { audio, setConnected } = await startSession(thread([]));
+    audio.take();
+    setConnected(false);
+    setConnected(false);
+    expect(audio.take()).toEqual([
+      ["playSound", "error"],
+      ["announce", "Server unreachable."],
+    ]);
+    setConnected(true);
+    expect(audio.take()).toEqual([]);
   });
 
   it("three presses while recording send once the recording's text is in the draft", async () => {
@@ -688,5 +752,50 @@ describe("WalkModeSession: sending", () => {
     audio.take();
     vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS * 2);
     expect(audio.take()).toEqual([]);
+  });
+});
+
+describe("WalkModeSession: headphones", () => {
+  it("losing them pauses speech, and replies and presses stay silent until they return", async () => {
+    const { session, audio, turns } = await startSession(thread([latest]));
+    audio.press(1);
+    audio.take();
+    audio.headphones(false);
+    expect(session.status).toBe("paused");
+    expect(audio.take()).toEqual([["pause"]]);
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
+    audio.press(1);
+    audio.press(3);
+    expect(session.status).toBe("paused");
+    expect(audio.take()).toEqual([["enqueue", ["Second reply."]]]);
+    audio.headphones(true);
+    audio.press(1);
+    expect(session.status).toBe("speaking");
+    expect(audio.take()).toEqual([["resume"]]);
+  });
+
+  it("a reply that completes without them waits as paused", async () => {
+    const { session, audio, turns } = await startSession(thread([]));
+    audio.headphones(false);
+    audio.take();
+    turns.set(thread([turn("run-1", 1, "completed", "Final answer.")]));
+    expect(audio.take()).toEqual([]);
+    expect(session.status).toBe("paused");
+  });
+
+  it("losing them stops a recording silently, keeps its text, and sends nothing", async () => {
+    const { session, audio, draft, sent, rested } = await startSession(thread([]), {
+      draft: "Typed first.",
+      transcripts: ["Spoken last."],
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.take();
+    audio.headphones(false);
+    await rested();
+    expect(audio.take()).toEqual([["stopRecording"]]);
+    expect(draft.text).toBe("Typed first.\n\nSpoken last.");
+    expect(sent).toEqual([]);
+    expect(session.status).toBe("idle");
   });
 });

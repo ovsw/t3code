@@ -23,7 +23,6 @@ export const SETTINGS_PAGE_TARGETS = [
   "SettingsDiagnostics",
   "SettingsOpenSourceLicenses",
   "SettingsUsage",
-  "SettingsWalkModeSpike",
 ] as const;
 
 export type SettingsPageTarget = (typeof SETTINGS_PAGE_TARGETS)[number];
