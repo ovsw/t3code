@@ -106,12 +106,16 @@ export class WalkModeSession {
     this.cleanups.push(audio.subscribe((event) => this.handleAudioEvent(event)));
     try {
       await audio.configureSession();
+      if (!this.running) return;
       await audio.setKeepAlive(true);
     } catch (error) {
       this.stop();
       throw error;
     }
-    if (!this.running) return;
+    if (!this.running) {
+      ignoreFailure(audio.setKeepAlive(false));
+      return;
+    }
     this.cleanups.push(turns.subscribe(() => this.syncTurns()));
     this.syncTurns();
   }
@@ -151,12 +155,14 @@ export class WalkModeSession {
       ignoreFailure(this.input.audio.setNowPlayingTitle(turns.title));
     }
     const readable = readableWalkModeRuns(turns);
+    // A run can turn terminal before its reply text arrives, so a run is seen only once
+    // its reply has loaded; a run without one is checked again on the next change.
     if (!this.baselineTaken) {
       this.baselineTaken = true;
-      for (const run of readable) this.seenRuns.add(run.id);
       for (let index = readable.length - 1; index >= 0; index -= 1) {
         const reply = walkModeReplyForRun(turns, readable[index]!.id);
         if (reply === null) continue;
+        for (const run of readable.slice(0, index + 1)) this.seenRuns.add(run.id);
         this.pendingChunks.push(...reply.chunks);
         this.dispatch({ type: "reply.loaded" });
         break;
@@ -165,9 +171,9 @@ export class WalkModeSession {
     }
     for (const run of readable) {
       if (this.seenRuns.has(run.id)) continue;
-      this.seenRuns.add(run.id);
       const reply = walkModeReplyForRun(turns, run.id);
       if (reply === null) continue;
+      this.seenRuns.add(run.id);
       this.queueChunks(reply.chunks);
       this.dispatch({ type: "reply.arrived" });
     }

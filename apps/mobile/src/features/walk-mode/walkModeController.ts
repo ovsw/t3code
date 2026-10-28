@@ -57,7 +57,7 @@ function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
 }
 
 // The thread atom changes on every streamed token. The session only needs a
-// look when a run changes status or the thread is renamed.
+// look when a run changes status, the thread is renamed, or a reply lands late.
 function threadTurnStream(ref: ScopedThreadRef): WalkModeTurnStream {
   const atom = environmentThreadDetails.threadAtom(ref);
   const projection = () => appAtomRegistry.get(atom)?.projection ?? null;
@@ -76,11 +76,20 @@ function threadTurnStream(ref: ScopedThreadRef): WalkModeTurnStream {
     subscribe: (onChange) => {
       let runs = projection()?.runs;
       let title = projection()?.thread.title;
+      let turnItems = projection()?.turnItems;
+      let messages = projection()?.messages;
       return appAtomRegistry.subscribe(atom, () => {
         const current = projection();
-        if (current?.runs === runs && current?.thread.title === title) return;
+        // Tokens stream only while a run is running; item changes outside that can carry
+        // the reply text of a run that already turned terminal.
+        const itemsChanged =
+          (current?.turnItems !== turnItems || current?.messages !== messages) &&
+          !current?.runs.some((run) => run.status === "running");
+        if (current?.runs === runs && current?.thread.title === title && !itemsChanged) return;
         runs = current?.runs;
         title = current?.thread.title;
+        turnItems = current?.turnItems;
+        messages = current?.messages;
         onChange();
       });
     },

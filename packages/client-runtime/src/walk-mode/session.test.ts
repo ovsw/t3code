@@ -196,6 +196,8 @@ describe("WalkModeSession: replies", () => {
     audio.take();
     turns.set(thread([turn("run-1", 1, "running", "Draft that may change.")]));
     expect(audio.take()).toEqual([]);
+    turns.set(thread([turn("run-1", 1, "completed", "")]));
+    expect(audio.take()).toEqual([]);
     turns.set(thread([turn("run-1", 1, "completed", "Final answer.")]));
     expect(audio.take()).toEqual([["speak", ["Final answer."]]]);
     expect(session.status).toBe("speaking");
@@ -238,7 +240,8 @@ describe("WalkModeSession: replies", () => {
   it("announces code blocks as skipped and drops markdown symbols", async () => {
     const reply = [
       "## Fix",
-      "Change the **guard** in `auth.ts`:",
+      "Change the **guard** in `auth_check.ts` for _snake_case_value_:",
+      "```md",
       "```ts",
       "if (!user) return;",
       "```",
@@ -250,7 +253,12 @@ describe("WalkModeSession: replies", () => {
     expect(audio.take()).toEqual([
       [
         "speak",
-        ["Fix", "Change the guard in auth.ts:", "Code block skipped.", "Then run the tests."],
+        [
+          "Fix",
+          "Change the guard in auth_check.ts for snake_case_value:",
+          "Code block skipped.",
+          "Then run the tests.",
+        ],
       ],
     ]);
   });

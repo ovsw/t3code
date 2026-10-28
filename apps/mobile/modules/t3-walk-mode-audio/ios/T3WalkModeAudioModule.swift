@@ -64,7 +64,7 @@ public class T3WalkModeAudioModule: Module {
       self.installRemoteCommands()
       self.updateNowPlaying(rate: 0)
       self.sendEvent("session", ["type": "configured"])
-    }
+    }.runOnQueue(.main)
 
     AsyncFunction("speak") { (chunks: [String]) in
       self.synthesizer.stopSpeaking(at: .immediate)

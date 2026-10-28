@@ -84,21 +84,25 @@ function flattenWalkModeQuestions(questions: ReadonlyArray<WalkModeQuestion>): s
 }
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const CLOSING_FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
 function replaceCodeBlocks(markdown: string): string {
   const lines: string[] = [];
   let fence: string | null = null;
   for (const line of markdown.split("\n")) {
-    const match = FENCE.exec(line);
     if (fence === null) {
+      const match = FENCE.exec(line);
       if (match) {
         fence = match[1]!;
         lines.push("", CODE_BLOCK_SKIPPED, "");
       } else {
         lines.push(line);
       }
-    } else if (match && match[1]![0] === fence[0] && match[1]!.length >= fence.length) {
-      fence = null;
+    } else {
+      const closing = CLOSING_FENCE.exec(line);
+      if (closing && closing[1]![0] === fence[0] && closing[1]!.length >= fence.length) {
+        fence = null;
+      }
     }
   }
   return lines.join("\n");
@@ -112,7 +116,8 @@ function stripInlineMarkdown(line: string): string {
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/`([^`]*)`/g, "$1")
-    .replace(/(\*\*|__|\*|_|~~)(\S(?:.*?\S)?)\1/g, "$2")
+    .replace(/(\*\*|\*|~~)(\S(?:.*?\S)?)\1/g, "$2")
+    .replace(/(^|\W)(__|_)(\S(?:.*?\S)?)\2(?=\W|$)/g, "$1$3")
     .trim();
 }
 

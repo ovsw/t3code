@@ -186,6 +186,7 @@ function createSpikeController(audio: WalkModeAudio | null) {
     dispose() {
       for (const subscription of subscriptions) subscription.remove();
       subscriptions.length = 0;
+      if (snapshot.state.kind === "recording") void audio?.stopRecording().catch(() => {});
       void audio?.stop();
       void audio?.setKeepAlive(false);
     },
