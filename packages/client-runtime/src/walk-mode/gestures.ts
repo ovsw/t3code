@@ -48,7 +48,7 @@ export type WalkModeStep = {
 
 export const initialWalkModeState: WalkModeState = { kind: "idle", hasSpeech: false, drafts: [] };
 
-export function joinDrafts(drafts: readonly string[]): string {
+function joinDrafts(drafts: readonly string[]): string {
   return drafts.join("\n\n");
 }
 
