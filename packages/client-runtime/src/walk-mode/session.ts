@@ -78,6 +78,8 @@ const WALK_MODE_MESSAGE_PREFIX =
 
 /** Added at send time only, so the draft keeps the walker's own words. */
 export function withWalkModePrefix(text: string): string {
+  // Slash commands must stay first so the server and composer still recognise them.
+  if (text.trimStart().startsWith("/")) return text;
   return `${WALK_MODE_MESSAGE_PREFIX}\n\n${text}`;
 }
 

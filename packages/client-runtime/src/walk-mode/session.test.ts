@@ -563,6 +563,14 @@ describe("WalkModeSession: sending", () => {
     expect(audio.take()).toEqual([["playSound", "sent"]]);
   });
 
+  it("a slash command is sent without the prefix", async () => {
+    const { audio, sent } = await startSession(thread([latest]), { draft: "/compact" });
+    audio.take();
+    audio.press(3);
+    await audio.until("playSound", "sent");
+    expect(sent).toEqual(["/compact"]);
+  });
+
   it("an empty draft plays the error sound and sends nothing", async () => {
     const { audio, sent } = await startSession(thread([]), { draft: "  \n " });
     audio.take();
