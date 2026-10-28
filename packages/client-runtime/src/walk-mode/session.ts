@@ -176,11 +176,8 @@ export class WalkModeSession {
       this.stop();
       throw error;
     }
-    // A stop during start may have shut down before the session was configured.
-    if (!this.running) {
-      ignoreFailure(audio.shutdown());
-      return;
-    }
+    // stop() already queued shutdown after these native calls; a second one could end a newer session.
+    if (!this.running) return;
     this.connected = connection.read();
     this.cleanups.push(connection.subscribe(() => this.syncConnection()));
     this.cleanups.push(turns.subscribe(() => this.syncTurns()));

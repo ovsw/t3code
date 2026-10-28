@@ -180,7 +180,7 @@ public class T3WalkModeAudioModule: Module {
     // when speech is paused the app may lose that role. This keeps it.
     AsyncFunction("setKeepAlive") { (enabled: Bool) throws in
       if enabled { try self.startKeepAlive() } else { self.stopKeepAlive() }
-    }
+    }.runOnQueue(.main)
 
     AsyncFunction("playSound") { (kind: String) in
       switch kind {

@@ -280,6 +280,16 @@ describe("WalkModeSession: start and stop", () => {
     expect(audio.take()).toEqual([["speak", ["The login works now.", "Try it again."]]]);
   });
 
+  it("a stop during start shuts down once, so a newer session is left alone", async () => {
+    const { session, audio } = await startSession(thread([latest]));
+    session.stop();
+    audio.take();
+    const starting = session.start();
+    session.stop();
+    await starting;
+    expect(audio.take()).toEqual([["configureSession"], ["shutdown"]]);
+  });
+
   it("shows a renamed thread's new title on the now-playing card", async () => {
     const { audio, turns } = await startSession(thread([latest]));
     audio.take();
