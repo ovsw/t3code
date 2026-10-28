@@ -28,6 +28,7 @@ function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
     stop: () => audio.stop(),
     setKeepAlive: (enabled) => audio.setKeepAlive(enabled),
     setNowPlayingTitle: (title) => audio.setNowPlayingTitle(title),
+    hasWiredInput: () => audio.hasWiredInput(),
     startRecording: (useCallMode) => audio.startRecording(useCallMode),
     stopRecording: () => audio.stopRecording(),
     playSound: (kind) => audio.playSound(kind),

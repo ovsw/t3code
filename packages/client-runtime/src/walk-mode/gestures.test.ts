@@ -76,10 +76,10 @@ describe("walk mode: recording", () => {
     expect(effectTypes).toEqual(["record.start"]);
   });
 
-  it("one press while recording is ignored", () => {
+  it("one press while recording stops it", () => {
     const { state, effectTypes } = run([double, single]);
-    expect(state.kind).toBe("recording");
-    expect(effectTypes).toEqual(["record.start"]);
+    expect(state.kind).toBe("transcribing");
+    expect(effectTypes).toEqual(["record.start", "record.stop"]);
   });
 
   it("stores the transcript as a draft and returns to paused when there is speech", () => {

@@ -1,4 +1,5 @@
-import type { VoiceTranscriber } from "../voice-input/transcription.ts";
+// @effect-diagnostics globalTimers:off - The session runs in the mobile client without an Effect runtime.
+import type { PreparedVoiceTranscription, VoiceTranscriber } from "../voice-input/transcription.ts";
 import {
   initialWalkModeState,
   walkModeReducer,
@@ -31,7 +32,11 @@ export interface WalkModeAudioPort {
   stop(): Promise<void>;
   setKeepAlive(enabled: boolean): Promise<void>;
   setNowPlayingTitle(title: string): Promise<void>;
+  /** A wired microphone (the Lightning dongle) is connected. */
+  hasWiredInput(): Promise<boolean>;
+  /** Call mode records the headset microphone through a fake call; otherwise the wired input. */
   startRecording(useCallMode: boolean): Promise<string>;
+  /** Ends any fake call and returns the headset to music mode. */
   stopRecording(): Promise<{ readonly uri: string | null; readonly seconds: number }>;
   playSound(kind: WalkModeSound): Promise<void>;
   subscribe(listener: (event: WalkModeAudioEvent) => void): () => void;
@@ -56,6 +61,8 @@ export type WalkModeSessionInput = {
   readonly transcriber: VoiceTranscriber | null;
 };
 
+export const WALK_MODE_RECORDING_LIMIT_MS = 5 * 60 * 1000;
+
 const PRESS_EVENTS = {
   1: { type: "press.single" },
   2: { type: "press.double" },
@@ -75,6 +82,8 @@ export class WalkModeSession {
   private readonly input: WalkModeSessionInput;
   private state: WalkModeState = initialWalkModeState;
   private running = false;
+  /** Changes on every start, so results from an earlier run are ignored. */
+  private runId = 0;
   private cleanups: Array<() => void> = [];
   private readonly listeners = new Set<() => void>();
   private readonly seenRuns = new Set<string>();
@@ -84,6 +93,11 @@ export class WalkModeSession {
   private pendingChunks: string[] = [];
   /** Chunks handed to the audio port that have not finished yet. */
   private loadedChunks = 0;
+  /** Settles true once the native recorder runs, false when it could not start. */
+  private recordingStarted: Promise<boolean> | null = null;
+  private recordingLimit: ReturnType<typeof setTimeout> | null = null;
+  private transcription: Promise<PreparedVoiceTranscription> | null = null;
+  private abortController = new AbortController();
 
   constructor(input: WalkModeSessionInput) {
     this.input = input;
@@ -102,6 +116,8 @@ export class WalkModeSession {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    this.runId += 1;
+    this.abortController = new AbortController();
     const { audio, turns } = this.input;
     this.cleanups.push(audio.subscribe((event) => this.handleAudioEvent(event)));
     try {
@@ -126,6 +142,14 @@ export class WalkModeSession {
     for (const cleanup of this.cleanups) cleanup();
     this.cleanups = [];
     const { audio } = this.input;
+    this.clearRecordingLimit();
+    this.abortController.abort();
+    this.transcription = null;
+    const recording = this.recordingStarted;
+    this.recordingStarted = null;
+    recording?.then((started) => {
+      if (started) ignoreFailure(audio.stopRecording());
+    });
     ignoreFailure(audio.stop());
     ignoreFailure(audio.setKeepAlive(false));
     this.pendingChunks = [];
@@ -228,10 +252,11 @@ export class WalkModeSession {
         else this.speakPending();
         return;
       case "record.start":
-        // Recording is not built yet: refuse it so the machine returns to rest.
-        this.dispatch({ type: "record.failed" });
+        this.startRecording();
         return;
       case "record.stop":
+        this.stopRecording();
+        return;
       case "send":
         return;
       case "sound.error":
@@ -241,5 +266,91 @@ export class WalkModeSession {
         ignoreFailure(audio.playSound("sent"));
         return;
     }
+  }
+
+  private startRecording(): void {
+    const { audio } = this.input;
+    if (this.input.transcriber === null) {
+      this.dispatch({ type: "record.failed" });
+      return;
+    }
+    const runId = this.runId;
+    const started = (async () => {
+      const wired = await audio.hasWiredInput();
+      await audio.startRecording(!wired);
+    })();
+    this.recordingStarted = started.then(
+      () => true,
+      () => false,
+    );
+    started.then(
+      () => {
+        if (runId !== this.runId || !this.running || this.state.kind !== "recording") return;
+        ignoreFailure(audio.playSound("tick"));
+        this.recordingLimit = setTimeout(() => {
+          this.recordingLimit = null;
+          if (this.state.kind === "recording") this.dispatch(PRESS_EVENTS[1]);
+        }, WALK_MODE_RECORDING_LIMIT_MS);
+      },
+      () => {
+        if (runId === this.runId) this.dispatch({ type: "record.failed" });
+      },
+    );
+  }
+
+  private stopRecording(): void {
+    this.clearRecordingLimit();
+    const runId = this.runId;
+    const started = this.recordingStarted;
+    this.recordingStarted = null;
+    ignoreFailure(this.input.audio.playSound("tick"));
+    void this.transcribeRecording(started).then(
+      (text) => {
+        if (runId !== this.runId || !this.running) return;
+        const trimmed = text.trim();
+        if (trimmed.length > 0) this.appendToDraft(trimmed);
+        this.dispatch({ type: "transcript.ready", text: trimmed });
+      },
+      // Also covers a recording stopped while starting whose start then failed.
+      () => {
+        if (runId === this.runId) this.dispatch({ type: "transcript.failed" });
+      },
+    );
+  }
+
+  private async transcribeRecording(started: Promise<boolean> | null): Promise<string> {
+    if (started === null || !(await started)) throw new Error("The recording did not start.");
+    const { uri } = await this.input.audio.stopRecording();
+    if (uri === null) throw new Error("The recording produced no audio.");
+    const prepared = await this.prepareTranscription();
+    return prepared.transcribe(uri, { signal: this.abortController.signal });
+  }
+
+  private prepareTranscription(): Promise<PreparedVoiceTranscription> {
+    const { transcriber } = this.input;
+    if (transcriber === null) return Promise.reject(new Error("No transcriber."));
+    if (this.transcription === null) {
+      const preparing = transcriber.prepare({ signal: this.abortController.signal });
+      preparing.catch(() => {
+        if (this.transcription === preparing) this.transcription = null;
+      });
+      this.transcription = preparing;
+    }
+    return this.transcription;
+  }
+
+  /** Each recording starts a new paragraph after text already in the draft. */
+  private appendToDraft(text: string): void {
+    const { draft } = this.input;
+    const existing = draft.read();
+    const newlines = (/\s*$/u.exec(existing)?.[0] ?? "").split("\n").length - 1;
+    const separator = existing.trim().length === 0 ? "" : "\n".repeat(Math.max(0, 2 - newlines));
+    draft.append(`${separator}${text}`);
+  }
+
+  private clearRecordingLimit(): void {
+    if (this.recordingLimit === null) return;
+    clearTimeout(this.recordingLimit);
+    this.recordingLimit = null;
   }
 }
