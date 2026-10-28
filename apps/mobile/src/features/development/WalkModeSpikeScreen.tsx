@@ -104,7 +104,7 @@ function createSpikeController(audio: WalkModeAudio | null) {
             const prepared = await transcriber.prepare({ signal: new AbortController().signal });
             const text = await prepared.transcribe(uri, { signal: new AbortController().signal });
             append(`transcript: ${text}`);
-            dispatch({ type: "transcript.ready", text });
+            dispatch({ type: "transcript.ready" });
           })
           .catch((error: unknown) => {
             append(`transcription error: ${String(error)}`);
@@ -112,13 +112,11 @@ function createSpikeController(audio: WalkModeAudio | null) {
           });
         return;
       case "send":
-        append(`SEND: ${effect.text.replaceAll("\n\n", " | ")}`);
+        append("SEND");
+        void audio.playSound("sent");
         return;
       case "sound.error":
         void audio.playSound("error");
-        return;
-      case "sound.sent":
-        void audio.playSound("sent");
         return;
     }
   };
@@ -212,8 +210,8 @@ export function WalkModeSpikeScreen() {
         <View className="gap-1 px-4 py-2">
           <Text className="text-lg font-semibold">{state.kind}</Text>
           <Text className="text-sm opacity-70">
-            drafts: {state.drafts.length} · speech queued: {state.hasSpeech ? "yes" : "no"} ·
-            session: {sessionReady ? "ready" : "not ready"}
+            speech queued: {state.hasSpeech ? "yes" : "no"} · session:{" "}
+            {sessionReady ? "ready" : "not ready"}
           </Text>
         </View>
       </SettingsSection>

@@ -15,6 +15,7 @@ export {
 } from "./reply.ts";
 export {
   WalkModeSession,
+  withWalkModePrefix,
   type WalkModeAudioEvent,
   type WalkModeAudioPort,
   type WalkModeDraft,

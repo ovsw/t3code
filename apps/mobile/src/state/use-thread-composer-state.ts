@@ -38,6 +38,7 @@ import { composerContextSendBlockReason, reidentifyComposerContext } from "../li
 import { uuidv4 } from "../lib/uuid";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
+import { walkModeMessageText } from "../features/walk-mode/walkModeController";
 import {
   describeUnavailableModelSelection,
   isModelSelectionUnavailable,
@@ -650,7 +651,7 @@ export function useThreadComposerState() {
       threadId: selectedThreadShell.id,
       messageId,
       commandId: CommandId.make(metadata.commandId),
-      text,
+      text: walkModeMessageText(threadKey, text),
       attachments,
       context: draft.context,
       modelSelection,

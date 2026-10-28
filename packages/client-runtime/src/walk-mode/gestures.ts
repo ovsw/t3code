@@ -5,19 +5,17 @@
 // Spike decisions still open for review are marked DECISION.
 
 export type WalkModeState =
-  | { readonly kind: "idle"; readonly hasSpeech: false; readonly drafts: readonly string[] }
-  | { readonly kind: "speaking"; readonly hasSpeech: true; readonly drafts: readonly string[] }
-  | { readonly kind: "paused"; readonly hasSpeech: true; readonly drafts: readonly string[] }
+  | { readonly kind: "idle"; readonly hasSpeech: false }
+  | { readonly kind: "speaking"; readonly hasSpeech: true }
+  | { readonly kind: "paused"; readonly hasSpeech: true }
   | {
       readonly kind: "recording";
       readonly hasSpeech: boolean;
-      readonly drafts: readonly string[];
       readonly sendWhenDone: boolean;
     }
   | {
       readonly kind: "transcribing";
       readonly hasSpeech: boolean;
-      readonly drafts: readonly string[];
       readonly sendWhenDone: boolean;
     };
 
@@ -28,7 +26,7 @@ export type WalkModeEvent =
   | { readonly type: "reply.loaded" }
   | { readonly type: "reply.arrived" }
   | { readonly type: "speech.finished" }
-  | { readonly type: "transcript.ready"; readonly text: string }
+  | { readonly type: "transcript.ready" }
   | { readonly type: "transcript.failed" }
   | { readonly type: "record.failed" };
 
@@ -38,48 +36,27 @@ export type WalkModeEffect =
   | { readonly type: "speech.resume" }
   | { readonly type: "record.start" }
   | { readonly type: "record.stop" }
-  | { readonly type: "send"; readonly text: string }
-  | { readonly type: "sound.error" }
-  | { readonly type: "sound.sent" };
+  /** Sends the composer draft; the host plays the error sound when it is empty. */
+  | { readonly type: "send" }
+  | { readonly type: "sound.error" };
 
 export type WalkModeStep = {
   readonly state: WalkModeState;
   readonly effects: readonly WalkModeEffect[];
 };
 
-export const initialWalkModeState: WalkModeState = { kind: "idle", hasSpeech: false, drafts: [] };
+export const initialWalkModeState: WalkModeState = { kind: "idle", hasSpeech: false };
 
-function joinDrafts(drafts: readonly string[]): string {
-  return drafts.join("\n\n");
-}
-
-function restingState(hasSpeech: boolean, drafts: readonly string[]): WalkModeState {
-  return hasSpeech
-    ? { kind: "paused", hasSpeech: true, drafts }
-    : { kind: "idle", hasSpeech: false, drafts };
-}
-
-function send(
-  state: WalkModeState,
-  drafts: readonly string[],
-  extraEffects: readonly WalkModeEffect[] = [],
-): WalkModeStep {
-  if (drafts.length === 0) {
-    return { state: { ...state, drafts }, effects: [...extraEffects, { type: "sound.error" }] };
-  }
-  return {
-    state: { ...state, drafts: [] },
-    effects: [...extraEffects, { type: "send", text: joinDrafts(drafts) }, { type: "sound.sent" }],
-  };
+function restingState(hasSpeech: boolean): WalkModeState {
+  return hasSpeech ? { kind: "paused", hasSpeech: true } : { kind: "idle", hasSpeech: false };
 }
 
 function startRecording(
   hasSpeech: boolean,
-  drafts: readonly string[],
   extraEffects: readonly WalkModeEffect[] = [],
 ): WalkModeStep {
   return {
-    state: { kind: "recording", hasSpeech, drafts, sendWhenDone: false },
+    state: { kind: "recording", hasSpeech, sendWhenDone: false },
     effects: [...extraEffects, { type: "record.start" }],
   };
 }
@@ -89,7 +66,6 @@ function stopRecording(state: Extract<WalkModeState, { kind: "recording" }>): Wa
 }
 
 export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): WalkModeStep {
-  const { drafts } = state;
   const stay: WalkModeStep = { state, effects: [] };
 
   switch (event.type) {
@@ -97,12 +73,12 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
       switch (state.kind) {
         case "speaking":
           return {
-            state: { kind: "paused", hasSpeech: true, drafts },
+            state: { kind: "paused", hasSpeech: true },
             effects: [{ type: "speech.pause" }],
           };
         case "paused":
           return {
-            state: { kind: "speaking", hasSpeech: true, drafts },
+            state: { kind: "speaking", hasSpeech: true },
             effects: [{ type: "speech.resume" }],
           };
         case "recording":
@@ -118,14 +94,14 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
     case "press.double": {
       switch (state.kind) {
         case "paused":
-          return startRecording(true, drafts);
+          return startRecording(true);
         case "speaking":
           // DECISION: a double press while speaking pauses first, then records.
-          return startRecording(true, drafts, [{ type: "speech.pause" }]);
+          return startRecording(true, [{ type: "speech.pause" }]);
         case "idle":
           // DECISION: recording is allowed with nothing to read, so the user can
           // start a conversation.
-          return startRecording(false, drafts);
+          return startRecording(false);
         case "recording":
           return stopRecording(state);
         case "transcribing":
@@ -139,7 +115,7 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
         case "idle":
         case "speaking":
         case "paused":
-          return send(state, drafts);
+          return { state, effects: [{ type: "send" }] };
         case "recording":
           // The current recording is part of the message: stop it, send when its text arrives.
           return {
@@ -156,7 +132,7 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
       // A reply that waits for one press: the latest reply when the session starts.
       switch (state.kind) {
         case "idle":
-          return { state: { kind: "paused", hasSpeech: true, drafts }, effects: [] };
+          return { state: { kind: "paused", hasSpeech: true }, effects: [] };
         case "speaking":
         case "paused":
           return stay;
@@ -171,7 +147,7 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
       switch (state.kind) {
         case "idle":
           return {
-            state: { kind: "speaking", hasSpeech: true, drafts },
+            state: { kind: "speaking", hasSpeech: true },
             effects: [{ type: "speech.start" }],
           };
         case "speaking":
@@ -191,7 +167,7 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
       switch (state.kind) {
         case "speaking":
         case "paused":
-          return { state: { kind: "idle", hasSpeech: false, drafts }, effects: [] };
+          return { state: { kind: "idle", hasSpeech: false }, effects: [] };
         case "recording":
         case "transcribing":
           return { state: { ...state, hasSpeech: false }, effects: [] };
@@ -202,22 +178,23 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
     }
 
     case "transcript.ready": {
+      // The host has already appended the text to the draft.
       if (state.kind !== "transcribing") return stay;
-      const text = event.text.trim();
-      const nextDrafts = text.length > 0 ? [...drafts, text] : drafts;
-      const rested = restingState(state.hasSpeech, nextDrafts);
-      return state.sendWhenDone ? send(rested, nextDrafts) : { state: rested, effects: [] };
+      return {
+        state: restingState(state.hasSpeech),
+        effects: state.sendWhenDone ? [{ type: "send" }] : [],
+      };
     }
 
     case "record.failed": {
       if (state.kind !== "recording") return stay;
-      return { state: restingState(state.hasSpeech, drafts), effects: [{ type: "sound.error" }] };
+      return { state: restingState(state.hasSpeech), effects: [{ type: "sound.error" }] };
     }
 
     case "transcript.failed": {
       if (state.kind !== "transcribing") return stay;
-      // DECISION: a failed transcription drops the pending send; earlier drafts are kept.
-      return { state: restingState(state.hasSpeech, drafts), effects: [{ type: "sound.error" }] };
+      // DECISION: a failed transcription drops the pending send; earlier draft text is kept.
+      return { state: restingState(state.hasSpeech), effects: [{ type: "sound.error" }] };
     }
   }
   return assertNever(event);
