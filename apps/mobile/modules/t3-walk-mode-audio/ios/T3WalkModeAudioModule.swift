@@ -11,6 +11,8 @@ public class T3WalkModeAudioModule: Module {
   private var speechDelegate: SpeechDelegate?
   private var remoteCommandsInstalled = false
   private var pendingUtterances = 0
+  private var nowPlayingTitle = "T3 Code"
+  private var nowPlayingRate: Double = 0
   private let keepAliveEngine = AVAudioEngine()
   private let keepAlivePlayer = AVAudioPlayerNode()
   private var keepAliveRunning = false
@@ -32,6 +34,7 @@ public class T3WalkModeAudioModule: Module {
         onChunkStarted: { [weak self] in self?.sendEvent("speech", ["type": "chunkStarted"]) },
         onChunkFinished: { [weak self] in
           guard let self else { return }
+          self.sendEvent("speech", ["type": "chunkFinished"])
           self.pendingUtterances = max(0, self.pendingUtterances - 1)
           if self.pendingUtterances == 0 {
             self.sendEvent("speech", ["type": "finished"])
@@ -65,13 +68,19 @@ public class T3WalkModeAudioModule: Module {
 
     AsyncFunction("speak") { (chunks: [String]) in
       self.synthesizer.stopSpeaking(at: .immediate)
-      self.pendingUtterances = chunks.count
-      for chunk in chunks {
-        let utterance = AVSpeechUtterance(string: chunk)
-        utterance.postUtteranceDelay = 0.25
-        self.synthesizer.speak(utterance)
-      }
+      self.pendingUtterances = 0
+      self.queueUtterances(chunks)
       self.updateNowPlaying(rate: 1)
+    }
+
+    // Appends after what is loaded; a paused synthesizer stays paused.
+    AsyncFunction("enqueue") { (chunks: [String]) in
+      self.queueUtterances(chunks)
+    }
+
+    AsyncFunction("setNowPlayingTitle") { (title: String) in
+      self.nowPlayingTitle = title
+      self.updateNowPlaying(rate: self.nowPlayingRate)
     }
 
     AsyncFunction("pause") {
@@ -182,10 +191,20 @@ public class T3WalkModeAudioModule: Module {
     }
   }
 
+  private func queueUtterances(_ chunks: [String]) {
+    pendingUtterances += chunks.count
+    for chunk in chunks {
+      let utterance = AVSpeechUtterance(string: chunk)
+      utterance.postUtteranceDelay = 0.25
+      synthesizer.speak(utterance)
+    }
+  }
+
   private func updateNowPlaying(rate: Double) {
+    nowPlayingRate = rate
     MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-      MPMediaItemPropertyTitle: "T3 Code walk mode",
-      MPMediaItemPropertyArtist: "Assistant reply",
+      MPMediaItemPropertyTitle: nowPlayingTitle,
+      MPMediaItemPropertyArtist: "T3 Code walk mode",
       MPNowPlayingInfoPropertyPlaybackRate: rate,
       MPMediaItemPropertyPlaybackDuration: 0,
       MPNowPlayingInfoPropertyElapsedPlaybackTime: 0,

@@ -25,6 +25,7 @@ export type WalkModeEvent =
   | { readonly type: "press.single" }
   | { readonly type: "press.double" }
   | { readonly type: "press.triple" }
+  | { readonly type: "reply.loaded" }
   | { readonly type: "reply.arrived" }
   | { readonly type: "speech.finished" }
   | { readonly type: "transcript.ready"; readonly text: string }
@@ -143,6 +144,21 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
           };
         case "transcribing":
           return { state: { ...state, sendWhenDone: true }, effects: [] };
+      }
+      return assertNever(state);
+    }
+
+    case "reply.loaded": {
+      // A reply that waits for one press: the latest reply when the session starts.
+      switch (state.kind) {
+        case "idle":
+          return { state: { kind: "paused", hasSpeech: true, drafts }, effects: [] };
+        case "speaking":
+        case "paused":
+          return stay;
+        case "recording":
+        case "transcribing":
+          return { state: { ...state, hasSpeech: true }, effects: [] };
       }
       return assertNever(state);
     }

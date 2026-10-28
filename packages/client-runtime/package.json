@@ -504,8 +504,8 @@
       "default": "./src/providerClients.ts"
     },
     "./walk-mode": {
-      "types": "./src/walk-mode/gestures.ts",
-      "default": "./src/walk-mode/gestures.ts"
+      "types": "./src/walk-mode/index.ts",
+      "default": "./src/walk-mode/index.ts"
     }
   },
   "scripts": {

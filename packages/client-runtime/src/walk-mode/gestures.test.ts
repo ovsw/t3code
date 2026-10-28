@@ -38,6 +38,12 @@ describe("walk mode: listening", () => {
     expect(effectTypes).toEqual(["speech.start", "speech.pause", "speech.resume"]);
   });
 
+  it("a loaded reply waits as paused, and one press reads it", () => {
+    const { state, effectTypes } = run([{ type: "reply.loaded" }, single]);
+    expect(state.kind).toBe("speaking");
+    expect(effectTypes).toEqual(["speech.resume"]);
+  });
+
   it("one press while idle does nothing", () => {
     const { state, effects } = run([single]);
     expect(state).toEqual(initialWalkModeState);
