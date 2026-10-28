@@ -1,0 +1,171 @@
+import AVFoundation
+import AudioToolbox
+import ExpoModulesCore
+import MediaPlayer
+
+// Walk mode spike. Answers one question: can the app own the headphone buttons and
+// keep speaking with the screen locked? Everything else lives in JS.
+public class T3WalkModeAudioModule: Module {
+  private let synthesizer = AVSpeechSynthesizer()
+  private var speechDelegate: SpeechDelegate?
+  private var remoteCommandsInstalled = false
+  private var pendingUtterances = 0
+  private let keepAliveEngine = AVAudioEngine()
+  private let keepAlivePlayer = AVAudioPlayerNode()
+  private var keepAliveRunning = false
+
+  public func definition() -> ModuleDefinition {
+    Name("T3WalkModeAudio")
+
+    Events("gesture", "speech", "session")
+
+    OnCreate {
+      let delegate = SpeechDelegate(
+        onChunkStarted: { [weak self] in self?.sendEvent("speech", ["type": "chunkStarted"]) },
+        onChunkFinished: { [weak self] in
+          guard let self else { return }
+          self.pendingUtterances = max(0, self.pendingUtterances - 1)
+          if self.pendingUtterances == 0 {
+            self.sendEvent("speech", ["type": "finished"])
+            self.updateNowPlaying(rate: 0)
+          }
+        })
+      self.speechDelegate = delegate
+      self.synthesizer.delegate = delegate
+    }
+
+    AsyncFunction("configureSession") { () throws in
+      let session = AVAudioSession.sharedInstance()
+      // .playback keeps audio alive with the screen locked (with UIBackgroundModes audio).
+      // .spokenAudio tells the system this is speech, so other audio ducks around it.
+      try session.setCategory(.playback, mode: .spokenAudio, options: [])
+      try session.setActive(true)
+      self.installRemoteCommands()
+      self.updateNowPlaying(rate: 0)
+      self.sendEvent("session", ["type": "configured"])
+    }
+
+    AsyncFunction("speak") { (chunks: [String]) in
+      self.synthesizer.stopSpeaking(at: .immediate)
+      self.pendingUtterances = chunks.count
+      for chunk in chunks {
+        let utterance = AVSpeechUtterance(string: chunk)
+        utterance.postUtteranceDelay = 0.25
+        self.synthesizer.speak(utterance)
+      }
+      self.updateNowPlaying(rate: 1)
+    }
+
+    AsyncFunction("pause") {
+      self.synthesizer.pauseSpeaking(at: .word)
+      self.updateNowPlaying(rate: 0)
+    }
+
+    AsyncFunction("resume") {
+      self.synthesizer.continueSpeaking()
+      self.updateNowPlaying(rate: 1)
+    }
+
+    AsyncFunction("stop") {
+      self.pendingUtterances = 0
+      self.synthesizer.stopSpeaking(at: .immediate)
+      self.updateNowPlaying(rate: 0)
+    }
+
+    // A looping silent buffer. iOS routes headphone buttons to the app that is "now playing";
+    // when speech is paused the app may lose that role. This keeps it. Off by default so the
+    // spike can compare both behaviours.
+    AsyncFunction("setKeepAlive") { (enabled: Bool) throws in
+      if enabled { try self.startKeepAlive() } else { self.stopKeepAlive() }
+    }
+
+    AsyncFunction("playSound") { (kind: String) in
+      switch kind {
+      case "error": AudioServicesPlaySystemSound(1073)
+      case "sent": AudioServicesPlaySystemSound(1001)
+      default: AudioServicesPlaySystemSound(1057)
+      }
+    }
+  }
+
+  private func installRemoteCommands() {
+    guard !remoteCommandsInstalled else { return }
+    remoteCommandsInstalled = true
+    UIApplication.shared.beginReceivingRemoteControlEvents()
+    let center = MPRemoteCommandCenter.shared()
+    let single: (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self] _ in
+      self?.sendEvent("gesture", ["presses": 1])
+      return .success
+    }
+    center.togglePlayPauseCommand.isEnabled = true
+    center.togglePlayPauseCommand.addTarget(handler: single)
+    center.playCommand.isEnabled = true
+    center.playCommand.addTarget(handler: single)
+    center.pauseCommand.isEnabled = true
+    center.pauseCommand.addTarget(handler: single)
+    center.nextTrackCommand.isEnabled = true
+    center.nextTrackCommand.addTarget { [weak self] _ in
+      self?.sendEvent("gesture", ["presses": 2])
+      return .success
+    }
+    center.previousTrackCommand.isEnabled = true
+    center.previousTrackCommand.addTarget { [weak self] _ in
+      self?.sendEvent("gesture", ["presses": 3])
+      return .success
+    }
+    for command in [center.seekForwardCommand, center.seekBackwardCommand, center.skipForwardCommand, center.skipBackwardCommand] {
+      command.isEnabled = false
+    }
+  }
+
+  private func updateNowPlaying(rate: Double) {
+    MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+      MPMediaItemPropertyTitle: "T3 Code walk mode",
+      MPMediaItemPropertyArtist: "Assistant reply",
+      MPNowPlayingInfoPropertyPlaybackRate: rate,
+      MPMediaItemPropertyPlaybackDuration: 0,
+      MPNowPlayingInfoPropertyElapsedPlaybackTime: 0,
+    ]
+  }
+
+  private func startKeepAlive() throws {
+    guard !keepAliveRunning else { return }
+    let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44_100)!
+    buffer.frameLength = 44_100
+    if !keepAliveEngine.attachedNodes.contains(keepAlivePlayer) {
+      keepAliveEngine.attach(keepAlivePlayer)
+      keepAliveEngine.connect(keepAlivePlayer, to: keepAliveEngine.mainMixerNode, format: format)
+    }
+    keepAliveEngine.mainMixerNode.outputVolume = 0
+    try keepAliveEngine.start()
+    keepAlivePlayer.scheduleBuffer(buffer, at: nil, options: [.loops])
+    keepAlivePlayer.play()
+    keepAliveRunning = true
+  }
+
+  private func stopKeepAlive() {
+    guard keepAliveRunning else { return }
+    keepAlivePlayer.stop()
+    keepAliveEngine.stop()
+    keepAliveRunning = false
+  }
+}
+
+private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
+  private let onChunkStarted: () -> Void
+  private let onChunkFinished: () -> Void
+
+  init(onChunkStarted: @escaping () -> Void, onChunkFinished: @escaping () -> Void) {
+    self.onChunkStarted = onChunkStarted
+    self.onChunkFinished = onChunkFinished
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+    onChunkStarted()
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+    onChunkFinished()
+  }
+}
