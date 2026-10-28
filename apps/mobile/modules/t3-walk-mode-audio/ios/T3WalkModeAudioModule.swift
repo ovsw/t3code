@@ -100,10 +100,13 @@ public class T3WalkModeAudioModule: Module {
     }
 
     // A microphone on the Lightning dongle; iOS prefers it over the built-in one.
+    // The .playback category reports no inputs, so ports are read in a recording category.
     AsyncFunction("hasWiredInput") { () -> Bool in
       let session = AVAudioSession.sharedInstance()
       let wired: Set<AVAudioSession.Port> = [.headsetMic, .usbAudio, .lineIn]
+      try? session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.allowBluetoothA2DP])
       let ports = (session.availableInputs ?? []) + session.currentRoute.inputs
+      self.restoreMusicMode()
       return ports.contains { wired.contains($0.portType) }
     }
 
@@ -287,9 +290,11 @@ public class T3WalkModeAudioModule: Module {
     callController.request(CXTransaction(action: startAction)) { [weak self] error in
       guard let self else { return }
       if let error {
-        self.activeCallId = nil
-        self.pendingCallRecordingPromise = nil
-        self.restoreMusicMode()
+        if self.activeCallId == callId {
+          self.activeCallId = nil
+          self.pendingCallRecordingPromise = nil
+          self.restoreMusicMode()
+        }
         promise.reject("E_CALL_START", error.localizedDescription)
         return
       }

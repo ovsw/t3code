@@ -82,6 +82,8 @@ export class WalkModeSession {
   private readonly input: WalkModeSessionInput;
   private state: WalkModeState = initialWalkModeState;
   private running = false;
+  /** Changes on every start, so results from an earlier run are ignored. */
+  private runId = 0;
   private cleanups: Array<() => void> = [];
   private readonly listeners = new Set<() => void>();
   private readonly seenRuns = new Set<string>();
@@ -114,6 +116,7 @@ export class WalkModeSession {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    this.runId += 1;
     this.abortController = new AbortController();
     const { audio, turns } = this.input;
     this.cleanups.push(audio.subscribe((event) => this.handleAudioEvent(event)));
@@ -271,6 +274,7 @@ export class WalkModeSession {
       this.dispatch({ type: "record.failed" });
       return;
     }
+    const runId = this.runId;
     const started = (async () => {
       const wired = await audio.hasWiredInput();
       await audio.startRecording(!wired);
@@ -281,31 +285,36 @@ export class WalkModeSession {
     );
     started.then(
       () => {
-        if (!this.running || this.state.kind !== "recording") return;
+        if (runId !== this.runId || !this.running || this.state.kind !== "recording") return;
         ignoreFailure(audio.playSound("tick"));
         this.recordingLimit = setTimeout(() => {
           this.recordingLimit = null;
           if (this.state.kind === "recording") this.dispatch(PRESS_EVENTS[1]);
         }, WALK_MODE_RECORDING_LIMIT_MS);
       },
-      () => this.dispatch({ type: "record.failed" }),
+      () => {
+        if (runId === this.runId) this.dispatch({ type: "record.failed" });
+      },
     );
   }
 
   private stopRecording(): void {
     this.clearRecordingLimit();
+    const runId = this.runId;
     const started = this.recordingStarted;
     this.recordingStarted = null;
     ignoreFailure(this.input.audio.playSound("tick"));
     void this.transcribeRecording(started).then(
       (text) => {
-        if (!this.running) return;
+        if (runId !== this.runId || !this.running) return;
         const trimmed = text.trim();
         if (trimmed.length > 0) this.appendToDraft(trimmed);
         this.dispatch({ type: "transcript.ready", text: trimmed });
       },
       // Also covers a recording stopped while starting whose start then failed.
-      () => this.dispatch({ type: "transcript.failed" }),
+      () => {
+        if (runId === this.runId) this.dispatch({ type: "transcript.failed" });
+      },
     );
   }
 
@@ -334,7 +343,8 @@ export class WalkModeSession {
   private appendToDraft(text: string): void {
     const { draft } = this.input;
     const existing = draft.read();
-    const separator = existing.trim().length === 0 || /\s$/u.test(existing) ? "" : "\n\n";
+    const newlines = (/\s*$/u.exec(existing)?.[0] ?? "").split("\n").length - 1;
+    const separator = existing.trim().length === 0 ? "" : "\n".repeat(Math.max(0, 2 - newlines));
     draft.append(`${separator}${text}`);
   }
 

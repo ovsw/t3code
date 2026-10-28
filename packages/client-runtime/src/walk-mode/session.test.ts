@@ -36,12 +36,16 @@ function changes() {
 type FakeAudioOptions = {
   readonly wiredInput?: boolean;
   readonly startFails?: boolean;
+  /** The first start fails only when the next start begins. */
+  readonly firstStartFailsLate?: boolean;
 };
 
 function fakeAudio(options: FakeAudioOptions = {}) {
   const calls: AudioCall[] = [];
   const changed = changes();
   const listeners = new Set<(event: WalkModeAudioEvent) => void>();
+  let heldStart: ((error: Error) => void) | null = null;
+  let starts = 0;
   const push = (call: AudioCall) => {
     calls.push(call);
     changed.notify();
@@ -63,6 +67,13 @@ function fakeAudio(options: FakeAudioOptions = {}) {
     hasWiredInput: async () => options.wiredInput ?? false,
     startRecording: async (useCallMode) => {
       push(["startRecording", useCallMode]);
+      starts += 1;
+      heldStart?.(new Error("Call could not start"));
+      if (options.firstStartFailsLate && starts === 1) {
+        return new Promise<string>((_, reject) => {
+          heldStart = reject;
+        });
+      }
       if (options.startFails) throw new Error("Call could not start");
       return "file:///recording.m4a";
     },
@@ -406,7 +417,7 @@ describe("WalkModeSession: recording", () => {
 
   it("a call action stops a recording, and each recording appends a paragraph", async () => {
     const { audio, draft, rested } = await startSession(thread([]), {
-      draft: "Typed first.",
+      draft: "Typed first. ",
       transcripts: ["Spoken second.", "Spoken third."],
     });
     audio.press(2);
@@ -417,7 +428,7 @@ describe("WalkModeSession: recording", () => {
     await audio.until("startRecording", true);
     audio.press(2);
     await rested();
-    expect(draft.text).toBe("Typed first.\n\nSpoken second.\n\nSpoken third.");
+    expect(draft.text).toBe("Typed first. \n\nSpoken second.\n\nSpoken third.");
   });
 
   it("uses a wired microphone without a call when one is connected", async () => {
@@ -497,6 +508,22 @@ describe("WalkModeSession: recording", () => {
     ]);
     expect(draft.text).toBe("Keep me.");
     expect(session.status).toBe("idle");
+  });
+
+  it("a start that fails after Walk mode restarts leaves the new recording alone", async () => {
+    const { session, audio } = await startSession(thread([]), { firstStartFailsLate: true });
+    audio.press(2);
+    await audio.until("startRecording", true);
+    session.stop();
+    await session.start();
+    audio.take();
+    audio.press(2);
+    await Promise.race([audio.until("playSound", "tick"), audio.until("playSound", "error")]);
+    expect(session.status).toBe("recording");
+    expect(audio.take()).toEqual([
+      ["startRecording", true],
+      ["playSound", "tick"],
+    ]);
   });
 
   it("turning Walk mode off ends a running recording", async () => {
