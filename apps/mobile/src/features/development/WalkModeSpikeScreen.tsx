@@ -34,6 +34,7 @@ type Snapshot = {
   readonly state: WalkModeState;
   readonly log: readonly LogLine[];
   readonly keepAlive: boolean;
+  readonly callMode: boolean;
   readonly sessionReady: boolean;
 };
 
@@ -50,6 +51,7 @@ function createSpikeController(audio: WalkModeAudio | null) {
     state: initialWalkModeState,
     log: [],
     keepAlive: false,
+    callMode: false,
     sessionReady: false,
   };
   let nextLogId = 1;
@@ -81,14 +83,14 @@ function createSpikeController(audio: WalkModeAudio | null) {
         return;
       case "record.start":
         audio
-          .startRecording()
+          .startRecording(snapshot.callMode)
           .then(() => {
             void audio.playSound("tick");
             append("recording started");
           })
           .catch((error: unknown) => {
             append(`record start error: ${String(error)}`);
-            dispatch({ type: "transcript.failed" });
+            dispatch({ type: "record.failed" });
           });
         return;
       case "record.stop":
@@ -142,9 +144,15 @@ function createSpikeController(audio: WalkModeAudio | null) {
         return;
       }
       subscriptions.push(
-        audio.addListener("gesture", ({ presses }) => {
-          append(`headphones: ${presses} press${presses === 1 ? "" : "es"}`);
-          dispatch(GESTURE_EVENTS[presses]);
+        audio.addListener("gesture", (event) => {
+          if (event.source === "call") {
+            // In call mode every stem press is a call action; any of them stops the recording.
+            append(`call action: ${event.action}`);
+            if (snapshot.state.kind === "recording") dispatch(GESTURE_EVENTS[2]);
+            return;
+          }
+          append(`headphones: ${event.presses} press${event.presses === 1 ? "" : "es"}`);
+          dispatch(GESTURE_EVENTS[event.presses]);
         }),
         audio.addListener("speech", (event) => {
           if (event.type === "finished") dispatch({ type: "speech.finished" });
@@ -152,6 +160,8 @@ function createSpikeController(audio: WalkModeAudio | null) {
         audio.addListener("session", (event) => {
           if (event.type === "route") append(`route: out ${event.outputs} / in ${event.inputs}`);
           else if (event.type === "engineRestarted") append("keep-alive engine restarted");
+          else if (event.type === "callAudioActivated")
+            append("call audio active, recording from headset");
         }),
       );
       audio
@@ -161,6 +171,10 @@ function createSpikeController(audio: WalkModeAudio | null) {
           append("audio session configured, remote commands installed");
         })
         .catch((error: unknown) => append(`session error: ${String(error)}`));
+    },
+    setCallMode(enabled: boolean) {
+      publish({ callMode: enabled });
+      append(`call mode ${enabled ? "on" : "off"}`);
     },
     setKeepAlive(enabled: boolean) {
       publish({ keepAlive: enabled });
@@ -180,7 +194,7 @@ function createSpikeController(audio: WalkModeAudio | null) {
 
 export function WalkModeSpikeScreen() {
   const [controller] = useState(() => createSpikeController(walkModeAudio));
-  const { state, log, keepAlive, sessionReady } = useSyncExternalStore(
+  const { state, log, keepAlive, callMode, sessionReady } = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
   );
@@ -212,6 +226,11 @@ export function WalkModeSpikeScreen() {
           <Button label="2 presses" onPress={() => controller.dispatch(GESTURE_EVENTS[2])} />
           <Button label="3 presses" onPress={() => controller.dispatch(GESTURE_EVENTS[3])} />
         </View>
+        <ListToggleRow
+          label="AirPods mic via call mode"
+          value={callMode}
+          onValueChange={(enabled) => controller.setCallMode(enabled)}
+        />
         <ListToggleRow
           label="Silent keep-alive track"
           value={keepAlive}

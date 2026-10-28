@@ -1,5 +1,6 @@
 import AVFoundation
 import AudioToolbox
+import CallKit
 import ExpoModulesCore
 import MediaPlayer
 
@@ -14,6 +15,12 @@ public class T3WalkModeAudioModule: Module {
   private let keepAlivePlayer = AVAudioPlayerNode()
   private var keepAliveRunning = false
   private var recorder: AVAudioRecorder?
+  private var callProvider: CXProvider?
+  private var callDelegate: CallDelegate?
+  private let callController = CXCallController()
+  private var activeCallId: UUID?
+  private var pendingCallRecordingPromise: Promise?
+  private var pendingCallRecordingURL: URL?
 
   public func definition() -> ModuleDefinition {
     Name("T3WalkModeAudio")
@@ -86,7 +93,7 @@ public class T3WalkModeAudioModule: Module {
     // Recording uses the phone microphone, never the headset one: a Bluetooth headset in
     // call (HFP) mode stops sending its button presses as media commands. A2DP keeps the
     // headset in music mode, so playback quality and the buttons survive the switch.
-    AsyncFunction("startRecording") { (promise: Promise) in
+    AsyncFunction("startRecording") { (useCallMode: Bool, promise: Promise) in
       let requestPermission: (@escaping (Bool) -> Void) -> Void = { completion in
         if #available(iOS 17.0, *) {
           AVAudioApplication.requestRecordPermission(completionHandler: completion)
@@ -99,25 +106,15 @@ public class T3WalkModeAudioModule: Module {
           promise.reject("E_MIC_DENIED", "Microphone permission denied")
           return
         }
+        if useCallMode {
+          self.startCallModeRecording(promise: promise)
+          return
+        }
         do {
           let session = AVAudioSession.sharedInstance()
           try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.allowBluetoothA2DP])
           try session.setActive(true)
-          let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("walk-mode-\(Int(Date().timeIntervalSince1970)).m4a")
-          let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
-          ]
-          let recorder = try AVAudioRecorder(url: url, settings: settings)
-          recorder.prepareToRecord()
-          guard recorder.record() else {
-            promise.reject("E_RECORD_START", "Recorder did not start")
-            return
-          }
-          self.recorder = recorder
+          let url = try self.beginRecorder()
           try self.restartKeepAliveIfNeeded()
           promise.resolve(url.absoluteString)
         } catch {
@@ -131,6 +128,7 @@ public class T3WalkModeAudioModule: Module {
       let seconds = recorder.currentTime
       recorder.stop()
       self.recorder = nil
+      self.endCallIfActive()
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(.playback, mode: .spokenAudio, options: [])
       try session.setActive(true)
@@ -194,6 +192,92 @@ public class T3WalkModeAudioModule: Module {
     ]
   }
 
+  private func beginRecorder() throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("walk-mode-\(Int(Date().timeIntervalSince1970)).m4a")
+    let settings: [String: Any] = [
+      AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+      AVSampleRateKey: 16_000,
+      AVNumberOfChannelsKey: 1,
+      AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+    ]
+    let recorder = try AVAudioRecorder(url: url, settings: settings)
+    recorder.prepareToRecord()
+    guard recorder.record() else {
+      throw NSError(domain: "T3WalkModeAudio", code: 1, userInfo: [NSLocalizedDescriptionKey: "Recorder did not start"])
+    }
+    self.recorder = recorder
+    return url
+  }
+
+  // Call mode: a fake outgoing call owned by this app. iOS then routes the headset
+  // microphone to us and delivers stem presses as call actions (mute, end).
+  private func ensureCallProvider() -> CXProvider {
+    if let provider = callProvider { return provider }
+    let configuration = CXProviderConfiguration()
+    configuration.supportsVideo = false
+    configuration.maximumCallGroups = 1
+    configuration.maximumCallsPerCallGroup = 1
+    configuration.includesCallsInRecents = false
+    configuration.supportedHandleTypes = [.generic]
+    let provider = CXProvider(configuration: configuration)
+    let delegate = CallDelegate(
+      onAudioActivated: { [weak self] in self?.callAudioActivated() },
+      onCallAction: { [weak self] action in
+        self?.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
+      })
+    provider.setDelegate(delegate, queue: nil)
+    callProvider = provider
+    callDelegate = delegate
+    return provider
+  }
+
+  private func startCallModeRecording(promise: Promise) {
+    let provider = ensureCallProvider()
+    _ = provider
+    let callId = UUID()
+    let handle = CXHandle(type: .generic, value: "T3 Code walk mode")
+    let startAction = CXStartCallAction(call: callId, handle: handle)
+    startAction.isVideo = false
+    do {
+      let session = AVAudioSession.sharedInstance()
+      try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+    } catch {
+      promise.reject("E_CALL_SESSION", error.localizedDescription)
+      return
+    }
+    pendingCallRecordingPromise = promise
+    activeCallId = callId
+    callController.request(CXTransaction(action: startAction)) { [weak self] error in
+      guard let self else { return }
+      if let error {
+        self.activeCallId = nil
+        self.pendingCallRecordingPromise = nil
+        promise.reject("E_CALL_START", error.localizedDescription)
+        return
+      }
+      self.callProvider?.reportOutgoingCall(with: callId, connectedAt: Date())
+    }
+  }
+
+  private func callAudioActivated() {
+    guard let promise = pendingCallRecordingPromise else { return }
+    pendingCallRecordingPromise = nil
+    do {
+      let url = try beginRecorder()
+      sendEvent("session", ["type": "callAudioActivated"])
+      promise.resolve(url.absoluteString)
+    } catch {
+      promise.reject("E_RECORD", error.localizedDescription)
+    }
+  }
+
+  private func endCallIfActive() {
+    guard let callId = activeCallId else { return }
+    activeCallId = nil
+    callController.request(CXTransaction(action: CXEndCallAction(call: callId))) { _ in }
+  }
+
   private func restartKeepAliveIfNeeded() throws {
     guard keepAliveRunning else { return }
     keepAlivePlayer.stop()
@@ -249,4 +333,41 @@ private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
     onChunkFinished()
   }
+}
+
+private final class CallDelegate: NSObject, CXProviderDelegate {
+  private let onAudioActivated: () -> Void
+  private let onCallAction: (String) -> Void
+
+  init(onAudioActivated: @escaping () -> Void, onCallAction: @escaping (String) -> Void) {
+    self.onAudioActivated = onAudioActivated
+    self.onCallAction = onCallAction
+  }
+
+  func providerDidReset(_ provider: CXProvider) {}
+
+  func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
+    action.fulfill()
+  }
+
+  func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+    onCallAction("end")
+    action.fulfill()
+  }
+
+  func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+    onCallAction(action.isMuted ? "mute" : "unmute")
+    action.fulfill()
+  }
+
+  func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
+    onCallAction(action.isOnHold ? "hold" : "unhold")
+    action.fulfill()
+  }
+
+  func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+    onAudioActivated()
+  }
+
+  func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {}
 }

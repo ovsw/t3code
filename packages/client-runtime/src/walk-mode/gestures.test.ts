@@ -109,6 +109,12 @@ describe("walk mode: recording", () => {
     expect(effectTypes).toEqual(["sound.error"]);
   });
 
+  it("returns to rest with the error sound when the recording cannot start", () => {
+    const { state, effectTypes } = run([reply, single, double, { type: "record.failed" }]);
+    expect(state).toEqual({ kind: "paused", hasSpeech: true, drafts: [] });
+    expect(effectTypes).toEqual(["speech.start", "speech.pause", "record.start", "sound.error"]);
+  });
+
   it("remembers a reply that arrives during recording, so one press plays it later", () => {
     const { state, effectTypes } = run([
       double,

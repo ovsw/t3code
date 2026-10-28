@@ -28,7 +28,8 @@ export type WalkModeEvent =
   | { readonly type: "reply.arrived" }
   | { readonly type: "speech.finished" }
   | { readonly type: "transcript.ready"; readonly text: string }
-  | { readonly type: "transcript.failed" };
+  | { readonly type: "transcript.failed" }
+  | { readonly type: "record.failed" };
 
 export type WalkModeEffect =
   | { readonly type: "speech.start" }
@@ -186,6 +187,11 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
       const nextDrafts = text.length > 0 ? [...drafts, text] : drafts;
       const rested = restingState(state.hasSpeech, nextDrafts);
       return state.sendWhenDone ? send(rested, nextDrafts) : { state: rested, effects: [] };
+    }
+
+    case "record.failed": {
+      if (state.kind !== "recording") return stay;
+      return { state: restingState(state.hasSpeech, drafts), effects: [{ type: "sound.error" }] };
     }
 
     case "transcript.failed": {
