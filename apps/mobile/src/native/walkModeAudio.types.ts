@@ -19,6 +19,7 @@ export interface WalkModeAudio {
   resume(): Promise<void>;
   stop(): Promise<void>;
   setKeepAlive(enabled: boolean): Promise<void>;
+  hasWiredInput(): Promise<boolean>;
   startRecording(useCallMode: boolean): Promise<string>;
   stopRecording(): Promise<{ readonly uri: string | null; readonly seconds: number }>;
   playSound(kind: "error" | "sent" | "tick" | "thinking"): Promise<void>;

@@ -99,9 +99,17 @@ public class T3WalkModeAudioModule: Module {
       self.updateNowPlaying(rate: 0)
     }
 
-    // Recording uses the phone microphone, never the headset one: a Bluetooth headset in
-    // call (HFP) mode stops sending its button presses as media commands. A2DP keeps the
-    // headset in music mode, so playback quality and the buttons survive the switch.
+    // A microphone on the Lightning dongle; iOS prefers it over the built-in one.
+    AsyncFunction("hasWiredInput") { () -> Bool in
+      let session = AVAudioSession.sharedInstance()
+      let wired: Set<AVAudioSession.Port> = [.headsetMic, .usbAudio, .lineIn]
+      let ports = (session.availableInputs ?? []) + session.currentRoute.inputs
+      return ports.contains { wired.contains($0.portType) }
+    }
+
+    // Without call mode, recording never uses the Bluetooth (HFP) option: HFP stops the
+    // headset sending its button presses as media commands. A2DP keeps the headset in
+    // music mode while a wired microphone records.
     AsyncFunction("startRecording") { (useCallMode: Bool, promise: Promise) in
       let requestPermission: (@escaping (Bool) -> Void) -> Void = { completion in
         if #available(iOS 17.0, *) {
@@ -127,6 +135,7 @@ public class T3WalkModeAudioModule: Module {
           try self.restartKeepAliveIfNeeded()
           promise.resolve(url.absoluteString)
         } catch {
+          self.restoreMusicMode()
           promise.reject("E_RECORD", error.localizedDescription)
         }
       }
@@ -267,11 +276,20 @@ public class T3WalkModeAudioModule: Module {
     }
     pendingCallRecordingPromise = promise
     activeCallId = callId
+    // A call whose audio never activates would leave the recording waiting forever.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+      guard let self, self.activeCallId == callId, let pending = self.pendingCallRecordingPromise else { return }
+      self.pendingCallRecordingPromise = nil
+      self.endCallIfActive()
+      self.restoreMusicMode()
+      pending.reject("E_CALL_TIMEOUT", "Call audio did not activate")
+    }
     callController.request(CXTransaction(action: startAction)) { [weak self] error in
       guard let self else { return }
       if let error {
         self.activeCallId = nil
         self.pendingCallRecordingPromise = nil
+        self.restoreMusicMode()
         promise.reject("E_CALL_START", error.localizedDescription)
         return
       }
@@ -287,8 +305,17 @@ public class T3WalkModeAudioModule: Module {
       sendEvent("session", ["type": "callAudioActivated"])
       promise.resolve(url.absoluteString)
     } catch {
+      endCallIfActive()
+      restoreMusicMode()
       promise.reject("E_RECORD", error.localizedDescription)
     }
+  }
+
+  private func restoreMusicMode() {
+    let session = AVAudioSession.sharedInstance()
+    try? session.setCategory(.playback, mode: .spokenAudio, options: [])
+    try? session.setActive(true)
+    try? restartKeepAliveIfNeeded()
   }
 
   private func endCallIfActive() {

@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { OrchestrationV2RunStatus } from "@t3tools/contracts";
 
 import type { WalkModeTurnItem, WalkModeTurns } from "./reply.ts";
 import {
+  WALK_MODE_RECORDING_LIMIT_MS,
   WalkModeSession,
   type WalkModeAudioEvent,
   type WalkModeAudioPort,
@@ -12,13 +13,43 @@ import {
 
 type AudioCall = readonly [method: string, ...args: unknown[]];
 
-function fakeAudio() {
+/** Resolves waiters when a condition they wait for becomes true; no polling. */
+function changes() {
+  const waiters = new Set<() => void>();
+  return {
+    notify: () => {
+      for (const waiter of Array.from(waiters)) waiter();
+    },
+    until: (check: () => boolean) =>
+      new Promise<void>((resolve) => {
+        const waiter = () => {
+          if (!check()) return;
+          waiters.delete(waiter);
+          resolve();
+        };
+        waiters.add(waiter);
+        waiter();
+      }),
+  };
+}
+
+type FakeAudioOptions = {
+  readonly wiredInput?: boolean;
+  readonly startFails?: boolean;
+};
+
+function fakeAudio(options: FakeAudioOptions = {}) {
   const calls: AudioCall[] = [];
+  const changed = changes();
   const listeners = new Set<(event: WalkModeAudioEvent) => void>();
+  const push = (call: AudioCall) => {
+    calls.push(call);
+    changed.notify();
+  };
   const record =
     (method: string) =>
     async (...args: unknown[]) => {
-      calls.push([method, ...args]);
+      push([method, ...args]);
     };
   const port: WalkModeAudioPort = {
     configureSession: record("configureSession"),
@@ -29,13 +60,15 @@ function fakeAudio() {
     stop: record("stop"),
     setKeepAlive: record("setKeepAlive"),
     setNowPlayingTitle: record("setNowPlayingTitle"),
+    hasWiredInput: async () => options.wiredInput ?? false,
     startRecording: async (useCallMode) => {
-      calls.push(["startRecording", useCallMode]);
+      push(["startRecording", useCallMode]);
+      if (options.startFails) throw new Error("Call could not start");
       return "file:///recording.m4a";
     },
     stopRecording: async () => {
-      calls.push(["stopRecording"]);
-      return { uri: null, seconds: 0 };
+      push(["stopRecording"]);
+      return { uri: "file:///recording.m4a", seconds: 3 };
     },
     playSound: record("playSound"),
     subscribe: (listener) => {
@@ -52,6 +85,10 @@ function fakeAudio() {
     /** Calls since the last `take`, then forgets them. */
     take: () => calls.splice(0),
     press: (presses: 1 | 2 | 3) => emit({ type: "gesture", presses }),
+    callAction: (action: string) => emit({ type: "call-action", action }),
+    /** Waits until an untaken call matches. */
+    until: (...expected: AudioCall) =>
+      changed.until(() => calls.some((call) => JSON.stringify(call) === JSON.stringify(expected))),
     finishChunks: (count: number) => {
       for (let index = 0; index < count; index += 1) emit({ type: "chunk-finished" });
     },
@@ -102,24 +139,61 @@ function thread(
   };
 }
 
-async function startSession(initial: WalkModeTurns | null) {
-  const audio = fakeAudio();
+type SessionOptions = FakeAudioOptions & {
+  readonly draft?: string;
+  /** Transcripts returned in order; an Error makes that transcription fail. */
+  readonly transcripts?: ReadonlyArray<string | Error>;
+};
+
+async function startSession(initial: WalkModeTurns | null, options: SessionOptions = {}) {
+  const audio = fakeAudio(options);
   const turns = fakeTurns(initial);
-  const drafts: string[] = [];
+  const draft = { text: options.draft ?? "" };
+  const transcripts = [...(options.transcripts ?? ["transcript"])];
   const sent: string[] = [];
   const session = new WalkModeSession({
     turns: turns.stream,
-    draft: { read: () => drafts.join(" "), append: (text) => drafts.push(text) },
+    draft: {
+      read: () => draft.text,
+      append: (text) => {
+        draft.text += text;
+      },
+    },
     send: async (text) => {
       sent.push(text);
     },
     audio: audio.port,
     transcriber: {
-      prepare: async () => ({ locale: "en-US", transcribe: async () => "transcript" }),
+      prepare: async () => ({
+        locale: "en-US",
+        transcribe: async () => {
+          const next = transcripts.shift() ?? "transcript";
+          if (next instanceof Error) throw next;
+          return next;
+        },
+      }),
     },
   });
   await session.start();
-  return { session, audio, turns, drafts, sent };
+  return {
+    session,
+    audio,
+    turns,
+    draft,
+    sent,
+    /** Waits until the session leaves recording and transcribing. */
+    rested: () =>
+      new Promise<void>((resolve) => {
+        const check = () => {
+          if (session.status === "recording" || session.status === "transcribing") return false;
+          unsubscribe();
+          resolve();
+          return true;
+        };
+        const unsubscribe = session.subscribe(check);
+        check();
+      }),
+  };
 }
 
 const first = turn("run-1", 1, "completed", "Older reply.");
@@ -303,5 +377,135 @@ describe("WalkModeSession: replies", () => {
     audio.take();
     turns.set(thread([turn("run-0", 1, "rolled_back", "Taken back."), multi]));
     expect(audio.take()).toEqual([["speak", ["Done."]]]);
+  });
+});
+
+describe("WalkModeSession: recording", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("two presses from idle record through call mode, and any press stops it into the draft", async () => {
+    const { session, audio, draft, rested } = await startSession(thread([]), {
+      transcripts: ["  Add a login test.  "],
+    });
+    audio.take();
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    expect(session.status).toBe("recording");
+    expect(audio.take()).toEqual([
+      ["startRecording", true],
+      ["playSound", "tick"],
+    ]);
+    audio.press(1);
+    await rested();
+    expect(audio.take()).toEqual([["playSound", "tick"], ["stopRecording"]]);
+    expect(draft.text).toBe("Add a login test.");
+    expect(session.status).toBe("idle");
+  });
+
+  it("a call action stops a recording, and each recording appends a paragraph", async () => {
+    const { audio, draft, rested } = await startSession(thread([]), {
+      draft: "Typed first.",
+      transcripts: ["Spoken second.", "Spoken third."],
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.callAction("end");
+    await rested();
+    audio.press(2);
+    await audio.until("startRecording", true);
+    audio.press(2);
+    await rested();
+    expect(draft.text).toBe("Typed first.\n\nSpoken second.\n\nSpoken third.");
+  });
+
+  it("uses a wired microphone without a call when one is connected", async () => {
+    const { audio } = await startSession(thread([]), { wiredInput: true });
+    audio.take();
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    expect(audio.take()).toEqual([
+      ["startRecording", false],
+      ["playSound", "tick"],
+    ]);
+  });
+
+  it("two presses while speaking pause first; a reply that completes meanwhile waits as paused", async () => {
+    const { session, audio, turns, rested } = await startSession(thread([latest]));
+    audio.press(1);
+    audio.take();
+    audio.press(2);
+    expect(audio.take()).toEqual([["pause"]]);
+    await audio.until("playSound", "tick");
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
+    audio.press(1);
+    await rested();
+    expect(session.status).toBe("paused");
+    expect(audio.take()).toEqual([
+      ["startRecording", true],
+      ["playSound", "tick"],
+      ["enqueue", ["Second reply."]],
+      ["playSound", "tick"],
+      ["stopRecording"],
+    ]);
+  });
+
+  it("stops by itself after five minutes, like a manual stop", async () => {
+    vi.useFakeTimers();
+    const { session, audio, draft, rested } = await startSession(thread([]));
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    vi.advanceTimersByTime(WALK_MODE_RECORDING_LIMIT_MS - 1);
+    expect(session.status).toBe("recording");
+    vi.advanceTimersByTime(1);
+    await rested();
+    expect(draft.text).toBe("transcript");
+    expect(session.status).toBe("idle");
+  });
+
+  it("plays the error sound and returns to paused when the recording cannot start", async () => {
+    const { session, audio, draft, rested } = await startSession(thread([latest]), {
+      startFails: true,
+      draft: "Keep me.",
+    });
+    audio.take();
+    audio.press(2);
+    await rested();
+    expect(audio.take()).toEqual([
+      ["startRecording", true],
+      ["playSound", "error"],
+    ]);
+    expect(session.status).toBe("paused");
+    expect(draft.text).toBe("Keep me.");
+  });
+
+  it("plays the error sound and keeps the draft when transcription fails", async () => {
+    const { session, audio, draft, rested } = await startSession(thread([]), {
+      draft: "Keep me.",
+      transcripts: [new Error("Speech model unavailable")],
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.take();
+    audio.press(1);
+    await rested();
+    expect(audio.take()).toEqual([
+      ["playSound", "tick"],
+      ["stopRecording"],
+      ["playSound", "error"],
+    ]);
+    expect(draft.text).toBe("Keep me.");
+    expect(session.status).toBe("idle");
+  });
+
+  it("turning Walk mode off ends a running recording", async () => {
+    const { session, audio } = await startSession(thread([]));
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.take();
+    session.stop();
+    await audio.until("stopRecording");
+    expect(audio.take()).toEqual([["stop"], ["setKeepAlive", false], ["stopRecording"]]);
   });
 });

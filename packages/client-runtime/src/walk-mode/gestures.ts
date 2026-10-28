@@ -84,6 +84,10 @@ function startRecording(
   };
 }
 
+function stopRecording(state: Extract<WalkModeState, { kind: "recording" }>): WalkModeStep {
+  return { state: { ...state, kind: "transcribing" }, effects: [{ type: "record.stop" }] };
+}
+
 export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): WalkModeStep {
   const { drafts } = state;
   const stay: WalkModeStep = { state, effects: [] };
@@ -101,11 +105,11 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
             state: { kind: "speaking", hasSpeech: true, drafts },
             effects: [{ type: "speech.resume" }],
           };
-        case "idle":
         case "recording":
+          // Any press stops a recording: in call mode presses arrive without a count.
+          return stopRecording(state);
+        case "idle":
         case "transcribing":
-          // DECISION: a single press is the easiest accidental press, so it never
-          // stops a recording and never sends.
           return stay;
       }
       return assertNever(state);
@@ -123,7 +127,7 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
           // start a conversation.
           return startRecording(false, drafts);
         case "recording":
-          return { state: { ...state, kind: "transcribing" }, effects: [{ type: "record.stop" }] };
+          return stopRecording(state);
         case "transcribing":
           return stay;
       }
