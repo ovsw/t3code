@@ -3,20 +3,27 @@ import { useSyncExternalStore } from "react";
 import {
   WalkModeSession,
   walkModeTurnsFromProjection,
+  withWalkModePrefix,
   type WalkModeAudioPort,
   type WalkModeStatus,
   type WalkModeTurns,
   type WalkModeTurnStream,
 } from "@t3tools/client-runtime/walk-mode";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import { CommandId, MessageId, type ScopedThreadRef } from "@t3tools/contracts";
 
+import { makeQueuedMessageMetadata } from "../../lib/commandMetadata";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
 import { walkModeAudio } from "../../native/walkModeAudio";
 import type { WalkModeAudio } from "../../native/walkModeAudio.types";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { environmentThreadDetails } from "../../state/threads";
-import { appendComposerDraftText, getComposerDraftSnapshot } from "../../state/use-composer-drafts";
+import {
+  appendComposerDraftText,
+  getComposerDraftSnapshot,
+  setComposerDraftText,
+} from "../../state/use-composer-drafts";
 
 function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
   return {
@@ -97,6 +104,25 @@ function threadTurnStream(ref: ScopedThreadRef): WalkModeTurnStream {
   };
 }
 
+/** Text only, queued after the active turn; the queue starts at once on an idle thread. */
+function sendWalkModeMessage(ref: ScopedThreadRef, draftKey: string, text: string): Promise<void> {
+  const draft = getComposerDraftSnapshot(draftKey);
+  const metadata = makeQueuedMessageMetadata();
+  return enqueueThreadOutboxMessage({
+    environmentId: ref.environmentId,
+    threadId: ref.threadId,
+    messageId: MessageId.make(metadata.messageId),
+    commandId: CommandId.make(metadata.commandId),
+    text,
+    attachments: [],
+    ...(draft.modelSelection === undefined ? {} : { modelSelection: draft.modelSelection }),
+    ...(draft.runtimeMode === undefined ? {} : { runtimeMode: draft.runtimeMode }),
+    ...(draft.interactionMode === undefined ? {} : { interactionMode: draft.interactionMode }),
+    dispatchMode: "queue",
+    createdAt: metadata.createdAt,
+  });
+}
+
 type ActiveWalkMode = {
   readonly threadKey: string;
   readonly session: WalkModeSession;
@@ -131,8 +157,9 @@ export async function startWalkMode(ref: ScopedThreadRef): Promise<void> {
     draft: {
       read: () => getComposerDraftSnapshot(draftKey).text,
       append: (text) => appendComposerDraftText(draftKey, text),
+      replace: (text) => setComposerDraftText(draftKey, text),
     },
-    send: () => Promise.reject(new Error("Walk mode cannot send messages yet.")),
+    send: (text) => sendWalkModeMessage(ref, draftKey, text),
     audio: nativeAudioPort(walkModeAudio),
     transcriber: getLocalVoiceTranscriber(),
   });
@@ -149,6 +176,11 @@ export async function startWalkMode(ref: ScopedThreadRef): Promise<void> {
     if (active === current) stopWalkMode();
     throw error;
   }
+}
+
+/** Screen sends on the Walk mode thread carry the same prefix as stem sends. */
+export function walkModeMessageText(threadKey: string, text: string): string {
+  return active !== null && active.threadKey === threadKey ? withWalkModePrefix(text) : text;
 }
 
 function subscribe(listener: () => void): () => void {

@@ -50,10 +50,10 @@ describe("walk mode: listening", () => {
     expect(effects).toEqual([]);
   });
 
-  it("goes idle when speech finishes, and keeps unsent drafts", () => {
-    const start: WalkModeState = { kind: "speaking", hasSpeech: true, drafts: ["keep me"] };
+  it("goes idle when speech finishes", () => {
+    const start: WalkModeState = { kind: "speaking", hasSpeech: true };
     const { state } = run([{ type: "speech.finished" }], start);
-    expect(state).toEqual({ kind: "idle", hasSpeech: false, drafts: ["keep me"] });
+    expect(state).toEqual({ kind: "idle", hasSpeech: false });
   });
 });
 
@@ -82,42 +82,26 @@ describe("walk mode: recording", () => {
     expect(effectTypes).toEqual(["record.start", "record.stop"]);
   });
 
-  it("stores the transcript as a draft and returns to paused when there is speech", () => {
-    const { state } = run([
-      reply,
-      single,
-      double,
-      double,
-      { type: "transcript.ready", text: "  hello  " },
-    ]);
-    expect(state).toEqual({ kind: "paused", hasSpeech: true, drafts: ["hello"] });
+  it("returns to paused after a transcript when there is speech", () => {
+    const { state } = run([reply, single, double, double, { type: "transcript.ready" }]);
+    expect(state).toEqual({ kind: "paused", hasSpeech: true });
   });
 
   it("returns to idle after a transcript when there is nothing to read", () => {
-    const { state } = run([double, double, { type: "transcript.ready", text: "hello" }]);
-    expect(state).toEqual({ kind: "idle", hasSpeech: false, drafts: ["hello"] });
+    const { state } = run([double, double, { type: "transcript.ready" }]);
+    expect(state).toEqual({ kind: "idle", hasSpeech: false });
   });
 
-  it("drops an empty transcript", () => {
-    const { state } = run([double, double, { type: "transcript.ready", text: "   " }]);
-    expect(state.drafts).toEqual([]);
-  });
-
-  it("plays the error sound when transcription fails, and keeps earlier drafts", () => {
-    const start: WalkModeState = {
-      kind: "transcribing",
-      hasSpeech: false,
-      drafts: ["first"],
-      sendWhenDone: true,
-    };
+  it("plays the error sound when transcription fails", () => {
+    const start: WalkModeState = { kind: "transcribing", hasSpeech: false, sendWhenDone: true };
     const { state, effectTypes } = run([{ type: "transcript.failed" }], start);
-    expect(state).toEqual({ kind: "idle", hasSpeech: false, drafts: ["first"] });
+    expect(state).toEqual({ kind: "idle", hasSpeech: false });
     expect(effectTypes).toEqual(["sound.error"]);
   });
 
   it("returns to rest with the error sound when the recording cannot start", () => {
     const { state, effectTypes } = run([reply, single, double, { type: "record.failed" }]);
-    expect(state).toEqual({ kind: "paused", hasSpeech: true, drafts: [] });
+    expect(state).toEqual({ kind: "paused", hasSpeech: true });
     expect(effectTypes).toEqual(["speech.start", "speech.pause", "record.start", "sound.error"]);
   });
 
@@ -126,7 +110,7 @@ describe("walk mode: recording", () => {
       double,
       reply,
       double,
-      { type: "transcript.ready", text: "hi" },
+      { type: "transcript.ready" },
       single,
     ]);
     expect(state.kind).toBe("speaking");
@@ -135,47 +119,27 @@ describe("walk mode: recording", () => {
 });
 
 describe("walk mode: sending", () => {
-  it("three presses send every draft as one message and clear them", () => {
-    const { state, effects } = run([
-      double,
-      double,
-      { type: "transcript.ready", text: "first part" },
-      double,
-      double,
-      { type: "transcript.ready", text: "second part" },
-      triple,
-    ]);
-    expect(effects).toContainEqual({ type: "send", text: "first part\n\nsecond part" });
-    expect(effects.at(-1)).toEqual({ type: "sound.sent" });
-    expect(state.drafts).toEqual([]);
-  });
-
-  it("three presses with nothing recorded only play the error sound", () => {
-    const { state, effectTypes } = run([triple]);
-    expect(state).toEqual(initialWalkModeState);
-    expect(effectTypes).toEqual(["sound.error"]);
-  });
-
-  it("three presses while speaking do not interrupt the speech", () => {
-    const start: WalkModeState = { kind: "speaking", hasSpeech: true, drafts: ["go"] };
-    const { state, effectTypes } = run([triple], start);
-    expect(state.kind).toBe("speaking");
-    expect(effectTypes).toEqual(["send", "sound.sent"]);
+  it("three presses send from idle, speaking, or paused without changing state", () => {
+    for (const start of [
+      initialWalkModeState,
+      { kind: "speaking", hasSpeech: true },
+      { kind: "paused", hasSpeech: true },
+    ] satisfies WalkModeState[]) {
+      const { state, effectTypes } = run([triple], start);
+      expect(state).toEqual(start);
+      expect(effectTypes).toEqual(["send"]);
+    }
   });
 
   it("three presses while recording stop the recording and send once its text arrives", () => {
-    const { state, effectTypes } = run([
-      double,
-      triple,
-      { type: "transcript.ready", text: "last words" },
-    ]);
-    expect(effectTypes).toEqual(["record.start", "record.stop", "send", "sound.sent"]);
-    expect(state.drafts).toEqual([]);
+    const { state, effectTypes } = run([double, triple, { type: "transcript.ready" }]);
+    expect(effectTypes).toEqual(["record.start", "record.stop", "send"]);
+    expect(state).toEqual(initialWalkModeState);
   });
 
   it("three presses while transcribing send as soon as the text arrives", () => {
-    const { effectTypes } = run([double, double, triple, { type: "transcript.ready", text: "x" }]);
-    expect(effectTypes).toEqual(["record.start", "record.stop", "send", "sound.sent"]);
+    const { effectTypes } = run([double, double, triple, { type: "transcript.ready" }]);
+    expect(effectTypes).toEqual(["record.start", "record.stop", "send"]);
   });
 
   it("a failed transcription cancels a pending send", () => {

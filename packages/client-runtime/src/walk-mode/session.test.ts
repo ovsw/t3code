@@ -5,7 +5,9 @@ import type { OrchestrationV2RunStatus } from "@t3tools/contracts";
 import type { WalkModeTurnItem, WalkModeTurns } from "./reply.ts";
 import {
   WALK_MODE_RECORDING_LIMIT_MS,
+  WALK_MODE_THINKING_INTERVAL_MS,
   WalkModeSession,
+  withWalkModePrefix,
   type WalkModeAudioEvent,
   type WalkModeAudioPort,
   type WalkModeTurnStream,
@@ -154,6 +156,7 @@ type SessionOptions = FakeAudioOptions & {
   readonly draft?: string;
   /** Transcripts returned in order; an Error makes that transcription fail. */
   readonly transcripts?: ReadonlyArray<string | Error>;
+  readonly sendFails?: boolean;
 };
 
 async function startSession(initial: WalkModeTurns | null, options: SessionOptions = {}) {
@@ -169,8 +172,12 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
       append: (text) => {
         draft.text += text;
       },
+      replace: (text) => {
+        draft.text = text;
+      },
     },
     send: async (text) => {
+      if (options.sendFails) throw new Error("Server unreachable");
       sent.push(text);
     },
     audio: audio.port,
@@ -534,5 +541,144 @@ describe("WalkModeSession: recording", () => {
     session.stop();
     await audio.until("stopRecording");
     expect(audio.take()).toEqual([["stop"], ["setKeepAlive", false], ["stopRecording"]]);
+  });
+});
+
+describe("WalkModeSession: sending", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("three presses send the draft with the prefix, clear the draft, and play the sent sound", async () => {
+    const { session, audio, draft, sent } = await startSession(thread([latest]), {
+      draft: "  Ship it.\n\nThen tell me.  ",
+    });
+    audio.take();
+    audio.press(3);
+    await audio.until("playSound", "sent");
+    expect(sent).toEqual([withWalkModePrefix("Ship it.\n\nThen tell me.")]);
+    expect(sent[0]).toMatch(/^\[Walk mode: I dictated this by voice/);
+    expect(draft.text).toBe("");
+    expect(session.status).toBe("paused");
+    expect(audio.take()).toEqual([["playSound", "sent"]]);
+  });
+
+  it("an empty draft plays the error sound and sends nothing", async () => {
+    const { audio, sent } = await startSession(thread([]), { draft: "  \n " });
+    audio.take();
+    audio.press(3);
+    expect(audio.take()).toEqual([["playSound", "error"]]);
+    expect(sent).toEqual([]);
+  });
+
+  it("a failed send plays the error sound and keeps the draft", async () => {
+    const { audio, draft } = await startSession(thread([]), { draft: "Keep me.", sendFails: true });
+    audio.take();
+    audio.press(3);
+    await audio.until("playSound", "error");
+    expect(draft.text).toBe("Keep me.");
+  });
+
+  it("three presses while recording send once the recording's text is in the draft", async () => {
+    const { audio, draft, sent, rested } = await startSession(thread([]), {
+      draft: "Typed first.",
+      transcripts: ["Spoken last."],
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.press(3);
+    await rested();
+    await audio.until("playSound", "sent");
+    expect(sent).toEqual([withWalkModePrefix("Typed first.\n\nSpoken last.")]);
+    expect(draft.text).toBe("");
+  });
+
+  it("three presses while transcribing send when the text arrives", async () => {
+    const { audio, sent, rested } = await startSession(thread([]), { transcripts: ["Hello."] });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.press(1);
+    audio.press(3);
+    await rested();
+    await audio.until("playSound", "sent");
+    expect(sent).toEqual([withWalkModePrefix("Hello.")]);
+  });
+
+  it("a failed transcription cancels the pending send", async () => {
+    const { audio, draft, sent, rested } = await startSession(thread([]), {
+      draft: "Typed first.",
+      transcripts: [new Error("Speech model unavailable")],
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.press(3);
+    await rested();
+    await audio.until("playSound", "error");
+    expect(sent).toEqual([]);
+    expect(draft.text).toBe("Typed first.");
+  });
+
+  it("repeats the thinking tone until the reply is ready, silent while the voice speaks", async () => {
+    vi.useFakeTimers();
+    const { audio, turns } = await startSession(thread([latest]), { draft: "Go on." });
+    audio.press(1);
+    audio.press(3);
+    await audio.until("playSound", "sent");
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS * 2);
+    expect(audio.take()).toEqual([]);
+    audio.press(1);
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS - 1);
+    expect(audio.take()).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(audio.take()).toEqual([["playSound", "thinking"]]);
+    audio.press(1);
+    audio.finishChunks(2);
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS);
+    expect(audio.take()).toEqual([["playSound", "thinking"]]);
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Done.")]));
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS * 3);
+    expect(audio.take()).toEqual([]);
+  });
+
+  it("a send during an active turn is sent at once, and the tone waits for the reply after it", async () => {
+    vi.useFakeTimers();
+    const active = turn("run-3", 3, "running", "Working.");
+    const { audio, turns, sent } = await startSession(thread([latest, active]), {
+      draft: "Also check the logout.",
+    });
+    audio.press(3);
+    await audio.until("playSound", "sent");
+    expect(sent).toHaveLength(1);
+    turns.set(thread([latest, turn("run-3", 3, "completed", "First done.")]));
+    audio.finishChunks(1);
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS);
+    expect(audio.take()).toEqual([["playSound", "thinking"]]);
+    turns.set(
+      thread([
+        latest,
+        turn("run-3", 3, "completed", "First done."),
+        turn("run-4", 4, "completed", "Logout checked."),
+      ]),
+    );
+    audio.finishChunks(1);
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS * 2);
+    expect(audio.take()).toEqual([]);
+  });
+
+  it("turning Walk mode off stops the thinking tone", async () => {
+    vi.useFakeTimers();
+    const { session, audio } = await startSession(thread([]), { draft: "Hi." });
+    audio.press(3);
+    await audio.until("playSound", "sent");
+    session.stop();
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS * 2);
+    expect(audio.take()).toEqual([]);
   });
 });

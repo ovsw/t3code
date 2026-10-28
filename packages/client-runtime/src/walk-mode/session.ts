@@ -7,7 +7,12 @@ import {
   type WalkModeEvent,
   type WalkModeState,
 } from "./gestures.ts";
-import { readableWalkModeRuns, walkModeReplyForRun, type WalkModeTurns } from "./reply.ts";
+import {
+  readableWalkModeRuns,
+  walkModeReplyForRun,
+  type WalkModeRun,
+  type WalkModeTurns,
+} from "./reply.ts";
 
 export type WalkModeStatus = WalkModeState["kind"];
 
@@ -51,17 +56,30 @@ export interface WalkModeTurnStream {
 export interface WalkModeDraft {
   read(): string;
   append(text: string): void;
+  replace(text: string): void;
 }
 
 export type WalkModeSessionInput = {
   readonly turns: WalkModeTurnStream;
   readonly draft: WalkModeDraft;
+  /** Sends one user message, queued after the active turn when one runs. */
   readonly send: (text: string) => Promise<void>;
   readonly audio: WalkModeAudioPort;
   readonly transcriber: VoiceTranscriber | null;
 };
 
 export const WALK_MODE_RECORDING_LIMIT_MS = 5 * 60 * 1000;
+
+export const WALK_MODE_THINKING_INTERVAL_MS = 4000;
+
+const WALK_MODE_MESSAGE_PREFIX =
+  "[Walk mode: I dictated this by voice, so expect transcription mistakes. Your reply is read aloud to me. " +
+  "Answer in short, plain spoken paragraphs, with no code and no lists, and ask one question at a time.]";
+
+/** Added at send time only, so the draft keeps the walker's own words. */
+export function withWalkModePrefix(text: string): string {
+  return `${WALK_MODE_MESSAGE_PREFIX}\n\n${text}`;
+}
 
 const PRESS_EVENTS = {
   1: { type: "press.single" },
@@ -98,6 +116,9 @@ export class WalkModeSession {
   private recordingLimit: ReturnType<typeof setTimeout> | null = null;
   private transcription: Promise<PreparedVoiceTranscription> | null = null;
   private abortController = new AbortController();
+  private thinkingTone: ReturnType<typeof setInterval> | null = null;
+  /** The thinking tone stops once a run newer than this ordinal reaches a terminal status. */
+  private awaitedAfterOrdinal: number | null = null;
 
   constructor(input: WalkModeSessionInput) {
     this.input = input;
@@ -143,6 +164,7 @@ export class WalkModeSession {
     this.cleanups = [];
     const { audio } = this.input;
     this.clearRecordingLimit();
+    this.stopThinking();
     this.abortController.abort();
     this.transcription = null;
     const recording = this.recordingStarted;
@@ -179,6 +201,7 @@ export class WalkModeSession {
       ignoreFailure(this.input.audio.setNowPlayingTitle(turns.title));
     }
     const readable = readableWalkModeRuns(turns);
+    this.checkReplyReady(readable);
     // A run can turn terminal before its reply text arrives, so a run is seen only once
     // its reply has loaded; a run without one is checked again on the next change.
     if (!this.baselineTaken) {
@@ -258,12 +281,10 @@ export class WalkModeSession {
         this.stopRecording();
         return;
       case "send":
+        this.sendDraft();
         return;
       case "sound.error":
         ignoreFailure(audio.playSound("error"));
-        return;
-      case "sound.sent":
-        ignoreFailure(audio.playSound("sent"));
         return;
     }
   }
@@ -309,7 +330,7 @@ export class WalkModeSession {
         if (runId !== this.runId || !this.running) return;
         const trimmed = text.trim();
         if (trimmed.length > 0) this.appendToDraft(trimmed);
-        this.dispatch({ type: "transcript.ready", text: trimmed });
+        this.dispatch({ type: "transcript.ready" });
       },
       // Also covers a recording stopped while starting whose start then failed.
       () => {
@@ -346,6 +367,56 @@ export class WalkModeSession {
     const newlines = (/\s*$/u.exec(existing)?.[0] ?? "").split("\n").length - 1;
     const separator = existing.trim().length === 0 ? "" : "\n".repeat(Math.max(0, 2 - newlines));
     draft.append(`${separator}${text}`);
+  }
+
+  private sendDraft(): void {
+    const { audio, draft } = this.input;
+    const text = draft.read();
+    if (text.trim().length === 0) {
+      ignoreFailure(audio.playSound("error"));
+      return;
+    }
+    // Taken before sending: the reply's run, started or queued, is newer than every run now.
+    const awaitedAfter = Math.max(
+      -1,
+      ...(this.input.turns.read()?.runs ?? []).map((run) => run.ordinal),
+    );
+    const runId = this.runId;
+    this.input.send(withWalkModePrefix(text.trim())).then(
+      () => {
+        if (runId !== this.runId || !this.running) return;
+        // Text added while the send was in flight stays in the draft.
+        const current = draft.read();
+        if (current.startsWith(text)) draft.replace(current.slice(text.length).trimStart());
+        ignoreFailure(audio.playSound("sent"));
+        this.startThinking(awaitedAfter);
+      },
+      () => {
+        if (runId === this.runId && this.running) ignoreFailure(audio.playSound("error"));
+      },
+    );
+  }
+
+  private startThinking(awaitedAfter: number): void {
+    this.awaitedAfterOrdinal = Math.max(this.awaitedAfterOrdinal ?? -1, awaitedAfter);
+    const turns = this.input.turns.read();
+    if (turns !== null) this.checkReplyReady(readableWalkModeRuns(turns));
+    if (this.awaitedAfterOrdinal === null || this.thinkingTone !== null) return;
+    this.thinkingTone = setInterval(() => {
+      if (this.state.kind !== "speaking") ignoreFailure(this.input.audio.playSound("thinking"));
+    }, WALK_MODE_THINKING_INTERVAL_MS);
+  }
+
+  private checkReplyReady(readable: readonly WalkModeRun[]): void {
+    const after = this.awaitedAfterOrdinal;
+    if (after !== null && readable.some((run) => run.ordinal > after)) this.stopThinking();
+  }
+
+  private stopThinking(): void {
+    this.awaitedAfterOrdinal = null;
+    if (this.thinkingTone === null) return;
+    clearInterval(this.thinkingTone);
+    this.thinkingTone = null;
   }
 
   private clearRecordingLimit(): void {
