@@ -12,6 +12,7 @@ import {
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
 import { ListToggleRow } from "../../components/ui/ListToggleRow";
+import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
 import { walkModeAudio } from "../../native/walkModeAudio";
 import type { WalkModeAudio } from "../../native/walkModeAudio.types";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
@@ -25,7 +26,6 @@ const SAMPLE_REPLY = [
   "This is the last sentence. After it, I stop and the state goes back to idle.",
 ];
 
-const FAKE_TRANSCRIPT_DELAY_MS = 800;
 const LOG_LIMIT = 60;
 
 type LogLine = { readonly id: number; readonly text: string };
@@ -53,7 +53,7 @@ function createSpikeController(audio: WalkModeAudio | null) {
     sessionReady: false,
   };
   let nextLogId = 1;
-  let recordingCount = 0;
+  const transcriber = getLocalVoiceTranscriber();
   const listeners = new Set<() => void>();
   const subscriptions: { remove(): void }[] = [];
 
@@ -80,19 +80,35 @@ function createSpikeController(audio: WalkModeAudio | null) {
         void audio.resume();
         return;
       case "record.start":
-        recordingCount += 1;
-        void audio.playSound("tick");
+        audio
+          .startRecording()
+          .then(() => {
+            void audio.playSound("tick");
+            append("recording started");
+          })
+          .catch((error: unknown) => {
+            append(`record start error: ${String(error)}`);
+            dispatch({ type: "transcript.failed" });
+          });
         return;
-      case "record.stop": {
-        // The spike has no microphone. It fakes a transcript after a short delay.
+      case "record.stop":
         void audio.playSound("tick");
-        const index = recordingCount;
-        setTimeout(
-          () => dispatch({ type: "transcript.ready", text: `fake recording ${index}` }),
-          FAKE_TRANSCRIPT_DELAY_MS,
-        );
+        audio
+          .stopRecording()
+          .then(async ({ uri, seconds }) => {
+            append(`recording stopped after ${seconds.toFixed(1)} s`);
+            if (!uri) throw new Error("no recording file");
+            if (!transcriber) throw new Error("on-device transcription unavailable");
+            const prepared = await transcriber.prepare({ signal: new AbortController().signal });
+            const text = await prepared.transcribe(uri, { signal: new AbortController().signal });
+            append(`transcript: ${text}`);
+            dispatch({ type: "transcript.ready", text });
+          })
+          .catch((error: unknown) => {
+            append(`transcription error: ${String(error)}`);
+            dispatch({ type: "transcript.failed" });
+          });
         return;
-      }
       case "send":
         append(`SEND: ${effect.text.replaceAll("\n\n", " | ")}`);
         return;
@@ -132,6 +148,10 @@ function createSpikeController(audio: WalkModeAudio | null) {
         }),
         audio.addListener("speech", (event) => {
           if (event.type === "finished") dispatch({ type: "speech.finished" });
+        }),
+        audio.addListener("session", (event) => {
+          if (event.type === "route") append(`route: out ${event.outputs} / in ${event.inputs}`);
+          else if (event.type === "engineRestarted") append("keep-alive engine restarted");
         }),
       );
       audio

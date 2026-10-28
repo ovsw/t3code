@@ -13,6 +13,7 @@ public class T3WalkModeAudioModule: Module {
   private let keepAliveEngine = AVAudioEngine()
   private let keepAlivePlayer = AVAudioPlayerNode()
   private var keepAliveRunning = false
+  private var recorder: AVAudioRecorder?
 
   public func definition() -> ModuleDefinition {
     Name("T3WalkModeAudio")
@@ -32,6 +33,16 @@ public class T3WalkModeAudioModule: Module {
         })
       self.speechDelegate = delegate
       self.synthesizer.delegate = delegate
+      let center = NotificationCenter.default
+      // A category or route change stops AVAudioEngine; the keep-alive must come back by itself.
+      center.addObserver(forName: .AVAudioEngineConfigurationChange, object: self.keepAliveEngine, queue: .main) { [weak self] _ in
+        guard let self else { return }
+        try? self.restartKeepAliveIfNeeded()
+        self.sendEvent("session", ["type": "engineRestarted"])
+      }
+      center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
+        self?.emitRoute()
+      }
     }
 
     AsyncFunction("configureSession") { () throws in
@@ -70,6 +81,61 @@ public class T3WalkModeAudioModule: Module {
       self.pendingUtterances = 0
       self.synthesizer.stopSpeaking(at: .immediate)
       self.updateNowPlaying(rate: 0)
+    }
+
+    // Recording uses the phone microphone, never the headset one: a Bluetooth headset in
+    // call (HFP) mode stops sending its button presses as media commands. A2DP keeps the
+    // headset in music mode, so playback quality and the buttons survive the switch.
+    AsyncFunction("startRecording") { (promise: Promise) in
+      let requestPermission: (@escaping (Bool) -> Void) -> Void = { completion in
+        if #available(iOS 17.0, *) {
+          AVAudioApplication.requestRecordPermission(completionHandler: completion)
+        } else {
+          AVAudioSession.sharedInstance().requestRecordPermission(completion)
+        }
+      }
+      requestPermission { granted in
+        guard granted else {
+          promise.reject("E_MIC_DENIED", "Microphone permission denied")
+          return
+        }
+        do {
+          let session = AVAudioSession.sharedInstance()
+          try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.allowBluetoothA2DP])
+          try session.setActive(true)
+          let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("walk-mode-\(Int(Date().timeIntervalSince1970)).m4a")
+          let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+          ]
+          let recorder = try AVAudioRecorder(url: url, settings: settings)
+          recorder.prepareToRecord()
+          guard recorder.record() else {
+            promise.reject("E_RECORD_START", "Recorder did not start")
+            return
+          }
+          self.recorder = recorder
+          try self.restartKeepAliveIfNeeded()
+          promise.resolve(url.absoluteString)
+        } catch {
+          promise.reject("E_RECORD", error.localizedDescription)
+        }
+      }
+    }
+
+    AsyncFunction("stopRecording") { () throws -> [String: Any] in
+      guard let recorder = self.recorder else { return ["uri": NSNull(), "seconds": 0] }
+      let seconds = recorder.currentTime
+      recorder.stop()
+      self.recorder = nil
+      let session = AVAudioSession.sharedInstance()
+      try session.setCategory(.playback, mode: .spokenAudio, options: [])
+      try session.setActive(true)
+      try self.restartKeepAliveIfNeeded()
+      return ["uri": recorder.url.absoluteString, "seconds": seconds]
     }
 
     // A looping silent buffer. iOS routes headphone buttons to the app that is "now playing";
@@ -126,6 +192,21 @@ public class T3WalkModeAudioModule: Module {
       MPMediaItemPropertyPlaybackDuration: 0,
       MPNowPlayingInfoPropertyElapsedPlaybackTime: 0,
     ]
+  }
+
+  private func restartKeepAliveIfNeeded() throws {
+    guard keepAliveRunning else { return }
+    keepAlivePlayer.stop()
+    keepAliveEngine.stop()
+    keepAliveRunning = false
+    try startKeepAlive()
+  }
+
+  private func emitRoute() {
+    let route = AVAudioSession.sharedInstance().currentRoute
+    let outputs = route.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
+    let inputs = route.inputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
+    sendEvent("session", ["type": "route", "outputs": outputs, "inputs": inputs])
   }
 
   private func startKeepAlive() throws {
