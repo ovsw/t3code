@@ -23,7 +23,8 @@ export type WalkModeAudioEvent =
   /** In call mode the headset sends call actions instead of press counts. */
   | { readonly type: "call-action"; readonly action: string }
   | { readonly type: "chunk-finished" }
-  | { readonly type: "route"; readonly outputs: string; readonly inputs: string };
+  /** Sent once the session is configured and whenever headphones connect or disconnect. */
+  | { readonly type: "route"; readonly headphones: boolean };
 
 /** The native audio module, as the session sees it. */
 export interface WalkModeAudioPort {
@@ -34,7 +35,8 @@ export interface WalkModeAudioPort {
   enqueue(chunks: readonly string[]): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
-  stop(): Promise<void>;
+  /** Speaks one sentence beside the reply queue, which keeps its place and pause state. */
+  announce(text: string): Promise<void>;
   setKeepAlive(enabled: boolean): Promise<void>;
   setNowPlayingTitle(title: string): Promise<void>;
   /** A wired microphone (the Lightning dongle) is connected. */
@@ -44,7 +46,15 @@ export interface WalkModeAudioPort {
   /** Ends any fake call and returns the headset to music mode. */
   stopRecording(): Promise<{ readonly uri: string | null; readonly seconds: number }>;
   playSound(kind: WalkModeSound): Promise<void>;
+  /** Ends speech, recording, any fake call, and the keep-alive, and releases the audio session. */
+  shutdown(): Promise<void>;
   subscribe(listener: (event: WalkModeAudioEvent) => void): () => void;
+}
+
+/** Whether the thread's environment is connected. */
+export interface WalkModeConnection {
+  read(): boolean;
+  subscribe(onChange: () => void): () => void;
 }
 
 export interface WalkModeTurnStream {
@@ -66,11 +76,19 @@ export type WalkModeSessionInput = {
   readonly send: (text: string) => Promise<void>;
   readonly audio: WalkModeAudioPort;
   readonly transcriber: VoiceTranscriber | null;
+  readonly connection: WalkModeConnection;
 };
 
 export const WALK_MODE_RECORDING_LIMIT_MS = 5 * 60 * 1000;
 
 export const WALK_MODE_THINKING_INTERVAL_MS = 4000;
+
+const WALK_MODE_ANNOUNCEMENTS = {
+  sendFailed: "Send failed, your draft is kept.",
+  transcriptionFailed: "Transcription failed, recording dropped.",
+  serverUnreachable: "Server unreachable.",
+  sendOffline: "Server unreachable, your draft is kept.",
+} as const;
 
 const WALK_MODE_MESSAGE_PREFIX =
   "[Walk mode: I dictated this by voice, so expect transcription mistakes. Your reply is read aloud to me. " +
@@ -121,6 +139,9 @@ export class WalkModeSession {
   private thinkingTone: ReturnType<typeof setInterval> | null = null;
   /** The thinking tone stops once a run newer than this ordinal reaches a terminal status. */
   private awaitedAfterOrdinal: number | null = null;
+  /** Assumed until the audio port reports the route; nothing is audible without them. */
+  private headphones = true;
+  private connected = true;
 
   constructor(input: WalkModeSessionInput) {
     this.input = input;
@@ -141,20 +162,24 @@ export class WalkModeSession {
     this.running = true;
     this.runId += 1;
     this.abortController = new AbortController();
-    const { audio, turns } = this.input;
+    this.headphones = true;
+    // A restart begins like a first start: silent, with the latest reply loaded as paused.
+    this.title = null;
+    this.baselineTaken = false;
+    this.seenRuns.clear();
+    const { audio, turns, connection } = this.input;
     this.cleanups.push(audio.subscribe((event) => this.handleAudioEvent(event)));
     try {
       await audio.configureSession();
-      if (!this.running) return;
-      await audio.setKeepAlive(true);
+      if (this.running) await audio.setKeepAlive(true);
     } catch (error) {
       this.stop();
       throw error;
     }
-    if (!this.running) {
-      ignoreFailure(audio.setKeepAlive(false));
-      return;
-    }
+    // stop() already queued shutdown after these native calls; a second one could end a newer session.
+    if (!this.running) return;
+    this.connected = connection.read();
+    this.cleanups.push(connection.subscribe(() => this.syncConnection()));
     this.cleanups.push(turns.subscribe(() => this.syncTurns()));
     this.syncTurns();
   }
@@ -171,11 +196,11 @@ export class WalkModeSession {
     this.transcription = null;
     const recording = this.recordingStarted;
     this.recordingStarted = null;
+    ignoreFailure(audio.shutdown());
+    // A recorder still starting when the shutdown ran is stopped once it runs.
     recording?.then((started) => {
       if (started) ignoreFailure(audio.stopRecording());
     });
-    ignoreFailure(audio.stop());
-    ignoreFailure(audio.setKeepAlive(false));
     this.pendingChunks = [];
     this.loadedChunks = 0;
     this.setState(initialWalkModeState);
@@ -224,8 +249,27 @@ export class WalkModeSession {
       if (reply === null) continue;
       this.seenRuns.add(run.id);
       this.queueChunks(reply.chunks);
-      this.dispatch({ type: "reply.arrived" });
+      // Without headphones the reply waits as paused instead of playing through the speaker.
+      this.dispatch({ type: this.headphones ? "reply.arrived" : "reply.loaded" });
     }
+  }
+
+  private syncConnection(): void {
+    const connected = this.input.connection.read();
+    const lost = this.connected && !connected;
+    this.connected = connected;
+    if (lost && this.running) this.announce(WALK_MODE_ANNOUNCEMENTS.serverUnreachable);
+  }
+
+  private playSound(kind: WalkModeSound): void {
+    if (this.headphones) ignoreFailure(this.input.audio.playSound(kind));
+  }
+
+  /** The error sound, then the problem in one spoken sentence. */
+  private announce(sentence: string): void {
+    if (!this.headphones) return;
+    this.playSound("error");
+    ignoreFailure(this.input.audio.announce(sentence));
   }
 
   private queueChunks(chunks: readonly string[]): void {
@@ -247,19 +291,24 @@ export class WalkModeSession {
   private handleAudioEvent(event: WalkModeAudioEvent): void {
     switch (event.type) {
       case "gesture":
-        this.dispatch(PRESS_EVENTS[event.presses]);
+        // Presses without headphones come from the lock screen and would play through the speaker.
+        if (this.headphones) this.dispatch(PRESS_EVENTS[event.presses]);
         return;
       case "call-action":
         // Call actions carry no press count, so any of them stops a recording.
-        if (this.state.kind === "recording") this.dispatch(PRESS_EVENTS[2]);
+        if (this.headphones && this.state.kind === "recording") this.dispatch(PRESS_EVENTS[2]);
         return;
       case "chunk-finished":
         if (this.loadedChunks === 0) return;
         this.loadedChunks -= 1;
         if (this.loadedChunks === 0) this.dispatch({ type: "speech.finished" });
         return;
-      case "route":
+      case "route": {
+        const lost = this.headphones && !event.headphones;
+        this.headphones = event.headphones;
+        if (lost) this.dispatch({ type: "headset.lost" });
         return;
+      }
     }
   }
 
@@ -286,7 +335,7 @@ export class WalkModeSession {
         this.sendDraft();
         return;
       case "sound.error":
-        ignoreFailure(audio.playSound("error"));
+        this.playSound("error");
         return;
     }
   }
@@ -309,7 +358,7 @@ export class WalkModeSession {
     started.then(
       () => {
         if (runId !== this.runId || !this.running || this.state.kind !== "recording") return;
-        ignoreFailure(audio.playSound("tick"));
+        this.playSound("tick");
         this.recordingLimit = setTimeout(() => {
           this.recordingLimit = null;
           if (this.state.kind === "recording") this.dispatch(PRESS_EVENTS[1]);
@@ -326,7 +375,7 @@ export class WalkModeSession {
     const runId = this.runId;
     const started = this.recordingStarted;
     this.recordingStarted = null;
-    ignoreFailure(this.input.audio.playSound("tick"));
+    this.playSound("tick");
     void this.transcribeRecording(started).then(
       (text) => {
         if (runId !== this.runId || !this.running) return;
@@ -336,7 +385,11 @@ export class WalkModeSession {
       },
       // Also covers a recording stopped while starting whose start then failed.
       () => {
-        if (runId === this.runId) this.dispatch({ type: "transcript.failed" });
+        if (runId !== this.runId || !this.running) return;
+        this.dispatch({ type: "transcript.failed" });
+        if (this.headphones) {
+          ignoreFailure(this.input.audio.announce(WALK_MODE_ANNOUNCEMENTS.transcriptionFailed));
+        }
       },
     );
   }
@@ -372,10 +425,15 @@ export class WalkModeSession {
   }
 
   private sendDraft(): void {
-    const { audio, draft } = this.input;
+    const { draft } = this.input;
     const text = draft.read();
     if (text.trim().length === 0) {
-      ignoreFailure(audio.playSound("error"));
+      this.playSound("error");
+      return;
+    }
+    // The message would wait in the outbox with no reply and no tone to explain the silence.
+    if (!this.connected) {
+      this.announce(WALK_MODE_ANNOUNCEMENTS.sendOffline);
       return;
     }
     // Taken before sending: the reply's run, started or queued, is newer than every run now.
@@ -390,11 +448,11 @@ export class WalkModeSession {
         // Text added while the send was in flight stays in the draft.
         const current = draft.read();
         if (current.startsWith(text)) draft.replace(current.slice(text.length).trimStart());
-        ignoreFailure(audio.playSound("sent"));
+        this.playSound("sent");
         this.startThinking(awaitedAfter);
       },
       () => {
-        if (runId === this.runId && this.running) ignoreFailure(audio.playSound("error"));
+        if (runId === this.runId && this.running) this.announce(WALK_MODE_ANNOUNCEMENTS.sendFailed);
       },
     );
   }
@@ -405,7 +463,7 @@ export class WalkModeSession {
     if (turns !== null) this.checkReplyReady(readableWalkModeRuns(turns));
     if (this.awaitedAfterOrdinal === null || this.thinkingTone !== null) return;
     this.thinkingTone = setInterval(() => {
-      if (this.state.kind !== "speaking") ignoreFailure(this.input.audio.playSound("thinking"));
+      if (this.state.kind !== "speaking") this.playSound("thinking");
     }, WALK_MODE_THINKING_INTERVAL_MS);
   }
 

@@ -147,3 +147,29 @@ describe("walk mode: sending", () => {
     expect(effectTypes).toEqual(["record.start", "record.stop", "sound.error"]);
   });
 });
+
+describe("walk mode: headphones lost", () => {
+  const lost: WalkModeEvent = { type: "headset.lost" };
+
+  it("pauses speech", () => {
+    const { state, effectTypes } = run([reply, lost]);
+    expect(state.kind).toBe("paused");
+    expect(effectTypes).toEqual(["speech.start", "speech.pause"]);
+  });
+
+  it("stops a recording, so its text still lands in the draft", () => {
+    const { state, effectTypes } = run([double, lost, { type: "transcript.ready" }]);
+    expect(state).toEqual(initialWalkModeState);
+    expect(effectTypes).toEqual(["record.start", "record.stop"]);
+  });
+
+  it("changes nothing while idle, paused, or transcribing", () => {
+    for (const start of [
+      initialWalkModeState,
+      { kind: "paused", hasSpeech: true },
+      { kind: "transcribing", hasSpeech: false, sendWhenDone: true },
+    ] satisfies WalkModeState[]) {
+      expect(run([lost], start)).toMatchObject({ state: start, effects: [] });
+    }
+  });
+});

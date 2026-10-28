@@ -1,6 +1,4 @@
 export {
-  initialWalkModeState,
-  walkModeReducer,
   type WalkModeEffect,
   type WalkModeEvent,
   type WalkModeState,
@@ -18,6 +16,7 @@ export {
   withWalkModePrefix,
   type WalkModeAudioEvent,
   type WalkModeAudioPort,
+  type WalkModeConnection,
   type WalkModeDraft,
   type WalkModeSessionInput,
   type WalkModeSound,

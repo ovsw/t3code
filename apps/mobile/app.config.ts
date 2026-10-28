@@ -267,7 +267,7 @@ const config: ExpoConfig = {
         "Allow T3 Code to connect to T3 Code servers on your local network or tailnet.",
       NSPhotoLibraryAddUsageDescription: "Allow T3 Code to save images to your photo library.",
       // System picture in picture needs background audio to start and survive outside the app.
-      // voip is only for the development Walk mode spike's call-mode recording; store review
+      // voip is only for Walk mode's call-mode recording in development builds; store review
       // rejects it without real VoIP calling.
       UIBackgroundModes: APP_VARIANT === "development" ? ["audio", "voip"] : ["audio"],
       ITSAppUsesNonExemptEncryption: false,

@@ -4,10 +4,13 @@ import CallKit
 import ExpoModulesCore
 import MediaPlayer
 
-// Walk mode spike. Answers one question: can the app own the headphone buttons and
-// keep speaking with the screen locked? Everything else lives in JS.
+// Walk mode's audio port: speech, headphone buttons, recording, and the keep-alive with the
+// screen locked. The behavior lives in the Walk mode session in the client runtime.
 public class T3WalkModeAudioModule: Module {
   private let synthesizer = AVSpeechSynthesizer()
+  // Spoken errors; separate so the reply queue keeps its place and pause state.
+  private let noticeSynthesizer = AVSpeechSynthesizer()
+  private var configured = false
   private var speechDelegate: SpeechDelegate?
   private var remoteCommandsInstalled = false
   private var pendingUtterances = 0
@@ -30,28 +33,21 @@ public class T3WalkModeAudioModule: Module {
     Events("gesture", "speech", "session")
 
     OnCreate {
-      let delegate = SpeechDelegate(
-        onChunkStarted: { [weak self] in self?.sendEvent("speech", ["type": "chunkStarted"]) },
-        onChunkFinished: { [weak self] in
-          guard let self else { return }
-          self.sendEvent("speech", ["type": "chunkFinished"])
-          self.pendingUtterances = max(0, self.pendingUtterances - 1)
-          if self.pendingUtterances == 0 {
-            self.sendEvent("speech", ["type": "finished"])
-            self.updateNowPlaying(rate: 0)
-          }
-        })
+      let delegate = SpeechDelegate(onChunkFinished: { [weak self] in
+        guard let self else { return }
+        self.sendEvent("speech", ["type": "chunkFinished"])
+        self.pendingUtterances = max(0, self.pendingUtterances - 1)
+        if self.pendingUtterances == 0 { self.updateNowPlaying(rate: 0) }
+      })
       self.speechDelegate = delegate
       self.synthesizer.delegate = delegate
       let center = NotificationCenter.default
       // A category or route change stops AVAudioEngine; the keep-alive must come back by itself.
       center.addObserver(forName: .AVAudioEngineConfigurationChange, object: self.keepAliveEngine, queue: .main) { [weak self] _ in
-        guard let self else { return }
-        try? self.restartKeepAliveIfNeeded()
-        self.sendEvent("session", ["type": "engineRestarted"])
+        try? self?.restartKeepAliveIfNeeded()
       }
-      center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
-        self?.emitRoute()
+      center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] notification in
+        self?.handleRouteChange(notification)
       }
     }
 
@@ -61,9 +57,10 @@ public class T3WalkModeAudioModule: Module {
       // .spokenAudio tells the system this is speech, so other audio ducks around it.
       try session.setCategory(.playback, mode: .spokenAudio, options: [])
       try session.setActive(true)
+      self.configured = true
       self.installRemoteCommands()
       self.updateNowPlaying(rate: 0)
-      self.sendEvent("session", ["type": "configured"])
+      self.emitRoute()
     }.runOnQueue(.main)
 
     AsyncFunction("speak") { (chunks: [String]) in
@@ -93,11 +90,28 @@ public class T3WalkModeAudioModule: Module {
       self.updateNowPlaying(rate: 1)
     }
 
-    AsyncFunction("stop") {
+    AsyncFunction("announce") { (text: String) in
+      self.noticeSynthesizer.speak(AVSpeechUtterance(string: text))
+    }
+
+    // Walk mode off: everything ends at once and other apps get the audio and buttons back.
+    AsyncFunction("shutdown") {
+      self.configured = false
       self.pendingUtterances = 0
       self.synthesizer.stopSpeaking(at: .immediate)
-      self.updateNowPlaying(rate: 0)
-    }
+      self.noticeSynthesizer.stopSpeaking(at: .immediate)
+      self.recorder?.stop()
+      self.recorder = nil
+      if let pending = self.pendingCallRecordingPromise {
+        self.pendingCallRecordingPromise = nil
+        pending.reject("E_STOPPED", "Walk mode stopped")
+      }
+      self.endCallIfActive()
+      self.stopKeepAlive()
+      self.removeRemoteCommands()
+      MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+      self.releaseSession()
+    }.runOnQueue(.main)
 
     // A microphone on the Lightning dongle; iOS prefers it over the built-in one.
     // The .playback category reports no inputs, so ports are read in a recording category.
@@ -150,6 +164,11 @@ public class T3WalkModeAudioModule: Module {
       recorder.stop()
       self.recorder = nil
       self.endCallIfActive()
+      // A recorder that started after a shutdown: release the session again.
+      guard self.configured else {
+        self.releaseSession()
+        return ["uri": recorder.url.absoluteString, "seconds": seconds]
+      }
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(.playback, mode: .spokenAudio, options: [])
       try session.setActive(true)
@@ -158,11 +177,10 @@ public class T3WalkModeAudioModule: Module {
     }
 
     // A looping silent buffer. iOS routes headphone buttons to the app that is "now playing";
-    // when speech is paused the app may lose that role. This keeps it. Off by default so the
-    // spike can compare both behaviours.
+    // when speech is paused the app may lose that role. This keeps it.
     AsyncFunction("setKeepAlive") { (enabled: Bool) throws in
       if enabled { try self.startKeepAlive() } else { self.stopKeepAlive() }
-    }
+    }.runOnQueue(.main)
 
     AsyncFunction("playSound") { (kind: String) in
       switch kind {
@@ -201,6 +219,17 @@ public class T3WalkModeAudioModule: Module {
     for command in [center.seekForwardCommand, center.seekBackwardCommand, center.skipForwardCommand, center.skipBackwardCommand] {
       command.isEnabled = false
     }
+  }
+
+  private func removeRemoteCommands() {
+    guard remoteCommandsInstalled else { return }
+    remoteCommandsInstalled = false
+    let center = MPRemoteCommandCenter.shared()
+    for command in [center.togglePlayPauseCommand, center.playCommand, center.pauseCommand, center.nextTrackCommand, center.previousTrackCommand] {
+      command.removeTarget(nil)
+      command.isEnabled = false
+    }
+    UIApplication.shared.endReceivingRemoteControlEvents()
   }
 
   private func queueUtterances(_ chunks: [String]) {
@@ -290,11 +319,11 @@ public class T3WalkModeAudioModule: Module {
     callController.request(CXTransaction(action: startAction)) { [weak self] error in
       guard let self else { return }
       if let error {
-        if self.activeCallId == callId {
-          self.activeCallId = nil
-          self.pendingCallRecordingPromise = nil
-          self.restoreMusicMode()
-        }
+        // A shutdown or the activation timeout has already settled the promise.
+        guard self.activeCallId == callId, self.pendingCallRecordingPromise != nil else { return }
+        self.activeCallId = nil
+        self.pendingCallRecordingPromise = nil
+        self.restoreMusicMode()
         promise.reject("E_CALL_START", error.localizedDescription)
         return
       }
@@ -307,13 +336,18 @@ public class T3WalkModeAudioModule: Module {
     pendingCallRecordingPromise = nil
     do {
       let url = try beginRecorder()
-      sendEvent("session", ["type": "callAudioActivated"])
       promise.resolve(url.absoluteString)
     } catch {
       endCallIfActive()
       restoreMusicMode()
       promise.reject("E_RECORD", error.localizedDescription)
     }
+  }
+
+  private func releaseSession() {
+    let session = AVAudioSession.sharedInstance()
+    try? session.setCategory(.playback, mode: .spokenAudio, options: [])
+    try? session.setActive(false, options: .notifyOthersOnDeactivation)
   }
 
   private func restoreMusicMode() {
@@ -337,11 +371,32 @@ public class T3WalkModeAudioModule: Module {
     try startKeepAlive()
   }
 
+  private static let headphonePorts: Set<AVAudioSession.Port> = [
+    .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .usbAudio,
+  ]
+
+  private func hasHeadphones() -> Bool {
+    AVAudioSession.sharedInstance().currentRoute.outputs.contains { Self.headphonePorts.contains($0.portType) }
+  }
+
   private func emitRoute() {
-    let route = AVAudioSession.sharedInstance().currentRoute
-    let outputs = route.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
-    let inputs = route.inputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
-    sendEvent("session", ["type": "route", "outputs": outputs, "inputs": inputs])
+    sendEvent("session", ["type": "route", "headphones": hasHeadphones()])
+  }
+
+  // Only device changes count: category changes for recording also change the route.
+  private func handleRouteChange(_ notification: Notification) {
+    guard configured,
+      let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+      let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
+      reason == .oldDeviceUnavailable || reason == .newDeviceAvailable
+    else { return }
+    if !hasHeadphones() {
+      // Pause here, before the session hears of it, so no word reaches the speaker.
+      synthesizer.pauseSpeaking(at: .immediate)
+      noticeSynthesizer.stopSpeaking(at: .immediate)
+      updateNowPlaying(rate: 0)
+    }
+    emitRoute()
   }
 
   private func startKeepAlive() throws {
@@ -369,16 +424,10 @@ public class T3WalkModeAudioModule: Module {
 }
 
 private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
-  private let onChunkStarted: () -> Void
   private let onChunkFinished: () -> Void
 
-  init(onChunkStarted: @escaping () -> Void, onChunkFinished: @escaping () -> Void) {
-    self.onChunkStarted = onChunkStarted
+  init(onChunkFinished: @escaping () -> Void) {
     self.onChunkFinished = onChunkFinished
-  }
-
-  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
-    onChunkStarted()
   }
 
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {

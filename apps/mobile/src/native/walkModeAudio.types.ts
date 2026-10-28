@@ -1,14 +1,8 @@
 export type WalkModeGestureEvent =
   | { readonly presses: 1 | 2 | 3; readonly source?: undefined }
   | { readonly presses: 1; readonly source: "call"; readonly action: string };
-export type WalkModeSpeechEvent = {
-  readonly type: "chunkStarted" | "chunkFinished" | "finished";
-};
-export type WalkModeSessionEvent =
-  | { readonly type: "configured" }
-  | { readonly type: "engineRestarted" }
-  | { readonly type: "callAudioActivated" }
-  | { readonly type: "route"; readonly outputs: string; readonly inputs: string };
+export type WalkModeSpeechEvent = { readonly type: "chunkFinished" };
+export type WalkModeSessionEvent = { readonly type: "route"; readonly headphones: boolean };
 
 export interface WalkModeAudio {
   configureSession(): Promise<void>;
@@ -17,12 +11,13 @@ export interface WalkModeAudio {
   setNowPlayingTitle(title: string): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
-  stop(): Promise<void>;
+  announce(text: string): Promise<void>;
   setKeepAlive(enabled: boolean): Promise<void>;
   hasWiredInput(): Promise<boolean>;
   startRecording(useCallMode: boolean): Promise<string>;
   stopRecording(): Promise<{ readonly uri: string | null; readonly seconds: number }>;
   playSound(kind: "error" | "sent" | "tick" | "thinking"): Promise<void>;
+  shutdown(): Promise<void>;
   addListener(
     event: "gesture",
     listener: (event: WalkModeGestureEvent) => void,

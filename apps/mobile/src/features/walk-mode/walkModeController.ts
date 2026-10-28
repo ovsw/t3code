@@ -5,6 +5,7 @@ import {
   walkModeTurnsFromProjection,
   withWalkModePrefix,
   type WalkModeAudioPort,
+  type WalkModeConnection,
   type WalkModeStatus,
   type WalkModeTurns,
   type WalkModeTurnStream,
@@ -18,6 +19,7 @@ import { walkModeAudio } from "../../native/walkModeAudio";
 import type { WalkModeAudio } from "../../native/walkModeAudio.types";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
+import { environmentConnectedAtom } from "../../state/use-remote-environment-registry";
 import { environmentThreadDetails } from "../../state/threads";
 import {
   appendComposerDraftText,
@@ -32,13 +34,14 @@ function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
     enqueue: (chunks) => audio.enqueue(chunks),
     pause: () => audio.pause(),
     resume: () => audio.resume(),
-    stop: () => audio.stop(),
+    announce: (text) => audio.announce(text),
     setKeepAlive: (enabled) => audio.setKeepAlive(enabled),
     setNowPlayingTitle: (title) => audio.setNowPlayingTitle(title),
     hasWiredInput: () => audio.hasWiredInput(),
     startRecording: (useCallMode) => audio.startRecording(useCallMode),
     stopRecording: () => audio.stopRecording(),
     playSound: (kind) => audio.playSound(kind),
+    shutdown: () => audio.shutdown(),
     subscribe: (listener) => {
       const subscriptions = [
         audio.addListener("gesture", (event) =>
@@ -48,14 +51,10 @@ function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
               : { type: "gesture", presses: event.presses },
           ),
         ),
-        audio.addListener("speech", (event) => {
-          if (event.type === "chunkFinished") listener({ type: "chunk-finished" });
-        }),
-        audio.addListener("session", (event) => {
-          if (event.type === "route") {
-            listener({ type: "route", outputs: event.outputs, inputs: event.inputs });
-          }
-        }),
+        audio.addListener("speech", () => listener({ type: "chunk-finished" })),
+        audio.addListener("session", (event) =>
+          listener({ type: "route", headphones: event.headphones }),
+        ),
       ];
       return () => {
         for (const subscription of subscriptions) subscription.remove();
@@ -101,6 +100,14 @@ function threadTurnStream(ref: ScopedThreadRef): WalkModeTurnStream {
         onChange();
       });
     },
+  };
+}
+
+function environmentConnection(ref: ScopedThreadRef): WalkModeConnection {
+  const atom = environmentConnectedAtom(ref.environmentId);
+  return {
+    read: () => appAtomRegistry.get(atom),
+    subscribe: (onChange) => appAtomRegistry.subscribe(atom, onChange),
   };
 }
 
@@ -162,6 +169,7 @@ export async function startWalkMode(ref: ScopedThreadRef): Promise<void> {
     send: (text) => sendWalkModeMessage(ref, draftKey, text),
     audio: nativeAudioPort(walkModeAudio),
     transcriber: getLocalVoiceTranscriber(),
+    connection: environmentConnection(ref),
   });
   const current: ActiveWalkMode = {
     threadKey: draftKey,

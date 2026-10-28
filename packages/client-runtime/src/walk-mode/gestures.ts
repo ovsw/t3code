@@ -28,7 +28,9 @@ export type WalkModeEvent =
   | { readonly type: "speech.finished" }
   | { readonly type: "transcript.ready" }
   | { readonly type: "transcript.failed" }
-  | { readonly type: "record.failed" };
+  | { readonly type: "record.failed" }
+  /** The output route lost its headphones. */
+  | { readonly type: "headset.lost" };
 
 export type WalkModeEffect =
   | { readonly type: "speech.start" }
@@ -189,6 +191,27 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
     case "record.failed": {
       if (state.kind !== "recording") return stay;
       return { state: restingState(state.hasSpeech), effects: [{ type: "sound.error" }] };
+    }
+
+    case "headset.lost": {
+      switch (state.kind) {
+        case "speaking":
+          return {
+            state: { kind: "paused", hasSpeech: true },
+            effects: [{ type: "speech.pause" }],
+          };
+        case "recording":
+          // The recording's text still lands in the draft, but nothing is sent.
+          return {
+            state: { ...state, kind: "transcribing", sendWhenDone: false },
+            effects: [{ type: "record.stop" }],
+          };
+        case "idle":
+        case "paused":
+        case "transcribing":
+          return stay;
+      }
+      return assertNever(state);
     }
 
     case "transcript.failed": {
