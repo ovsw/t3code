@@ -267,7 +267,9 @@ const config: ExpoConfig = {
         "Allow T3 Code to connect to T3 Code servers on your local network or tailnet.",
       NSPhotoLibraryAddUsageDescription: "Allow T3 Code to save images to your photo library.",
       // System picture in picture needs background audio to start and survive outside the app.
-      UIBackgroundModes: ["audio"],
+      // voip is only for the development Walk mode spike's call-mode recording; store review
+      // rejects it without real VoIP calling.
+      UIBackgroundModes: APP_VARIANT === "development" ? ["audio", "voip"] : ["audio"],
       ITSAppUsesNonExemptEncryption: false,
       // Capture builds disable multitasking because iPadOS otherwise ignores orientation requests.
       ...(process.env.T3_SHOWCASE_CAPTURE_BUILD === "1"

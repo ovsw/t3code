@@ -113,6 +113,7 @@
         "@t3tools/mobile-highlights-native",
         "@t3tools/mobile-review-diff-native",
         "@t3tools/mobile-terminal-native",
+        "@t3tools/mobile-walk-mode-audio-native",
       ],
     },
     "apps/mobile/modules/t3-source-text": {
