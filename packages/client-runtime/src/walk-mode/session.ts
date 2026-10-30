@@ -129,6 +129,8 @@ export class WalkModeSession {
   private title: string | null = null;
   /** Chunks of replies not yet handed to the audio port. */
   private pendingChunks: string[] = [];
+  /** The newest reply, read again by one press once speech has finished. */
+  private latestReplyChunks: readonly string[] = [];
   /** Chunks handed to the audio port that have not finished yet. */
   private loadedChunks = 0;
   /** Settles true once the native recorder runs, false when it could not start. */
@@ -165,6 +167,7 @@ export class WalkModeSession {
     this.headphones = true;
     // A restart begins like a first start: silent, with the latest reply loaded as paused.
     this.title = null;
+    this.latestReplyChunks = [];
     this.baselineTaken = false;
     this.seenRuns.clear();
     const { audio, turns, connection } = this.input;
@@ -238,6 +241,7 @@ export class WalkModeSession {
         if (reply === null) continue;
         for (const run of readable.slice(0, index + 1)) this.seenRuns.add(run.id);
         this.pendingChunks.push(...reply.chunks);
+        this.latestReplyChunks = reply.chunks;
         this.dispatch({ type: "reply.loaded" });
         break;
       }
@@ -248,6 +252,7 @@ export class WalkModeSession {
       const reply = walkModeReplyForRun(turns, run.id);
       if (reply === null) continue;
       this.seenRuns.add(run.id);
+      this.latestReplyChunks = reply.chunks;
       this.queueChunks(reply.chunks);
       // Without headphones the reply waits as paused instead of playing through the speaker.
       this.dispatch({ type: this.headphones ? "reply.arrived" : "reply.loaded" });
@@ -324,6 +329,15 @@ export class WalkModeSession {
       case "speech.resume":
         if (this.loadedChunks > 0) ignoreFailure(audio.resume());
         else this.speakPending();
+        return;
+      case "speech.replay":
+        if (this.latestReplyChunks.length === 0) {
+          this.playSound("error");
+          this.dispatch({ type: "speech.finished" });
+          return;
+        }
+        this.pendingChunks = [...this.latestReplyChunks];
+        this.speakPending();
         return;
       case "record.start":
         this.startRecording();

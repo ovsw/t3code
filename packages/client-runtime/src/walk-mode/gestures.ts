@@ -36,6 +36,8 @@ export type WalkModeEffect =
   | { readonly type: "speech.start" }
   | { readonly type: "speech.pause" }
   | { readonly type: "speech.resume" }
+  /** Reads the latest reply again; the host plays the error sound when there is none. */
+  | { readonly type: "speech.replay" }
   | { readonly type: "record.start" }
   | { readonly type: "record.stop" }
   /** Sends the composer draft; the host plays the error sound when it is empty. */
@@ -87,6 +89,10 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
           // Any press stops a recording: in call mode presses arrive without a count.
           return stopRecording(state);
         case "idle":
+          return {
+            state: { kind: "speaking", hasSpeech: true },
+            effects: [{ type: "speech.replay" }],
+          };
         case "transcribing":
           return stay;
       }

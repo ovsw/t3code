@@ -44,10 +44,10 @@ describe("walk mode: listening", () => {
     expect(effectTypes).toEqual(["speech.resume"]);
   });
 
-  it("one press while idle does nothing", () => {
-    const { state, effects } = run([single]);
-    expect(state).toEqual(initialWalkModeState);
-    expect(effects).toEqual([]);
+  it("one press while idle replays the latest reply", () => {
+    const { state, effectTypes } = run([single]);
+    expect(state).toEqual({ kind: "speaking", hasSpeech: true });
+    expect(effectTypes).toEqual(["speech.replay"]);
   });
 
   it("goes idle when speech finishes", () => {

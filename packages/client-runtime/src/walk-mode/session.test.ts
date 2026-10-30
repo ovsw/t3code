@@ -243,13 +243,13 @@ describe("WalkModeSession: start and stop", () => {
     expect(session.status).toBe("paused");
   });
 
-  it("starts idle when the thread has no completed reply, and a press does nothing", async () => {
+  it("starts idle when the thread has no completed reply, and a press plays the error sound", async () => {
     const running = turn("run-1", 1, "running", "Half a thought");
     const { session, audio } = await startSession(thread([running]));
     audio.take();
     audio.press(1);
     expect(session.status).toBe("idle");
-    expect(audio.take()).toEqual([]);
+    expect(audio.take()).toEqual([["playSound", "error"]]);
   });
 
   it("stop ends speech, turns the keep-alive off, and ignores later presses and replies", async () => {
@@ -307,7 +307,7 @@ describe("WalkModeSession: presses", () => {
     expect(session.status).toBe("speaking");
   });
 
-  it("presses toggle pause and resume, and the reply ends in idle", async () => {
+  it("presses toggle pause and resume, the reply ends in idle, and one more press replays it", async () => {
     const { session, audio } = await startSession(thread([latest]));
     audio.press(1);
     audio.take();
@@ -319,7 +319,8 @@ describe("WalkModeSession: presses", () => {
     audio.finishChunks(2);
     expect(session.status).toBe("idle");
     audio.press(1);
-    expect(audio.take()).toEqual([]);
+    expect(audio.take()).toEqual([["speak", ["The login works now.", "Try it again."]]]);
+    expect(session.status).toBe("speaking");
   });
 });
 

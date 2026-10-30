@@ -163,18 +163,18 @@ public class T3WalkModeAudioModule: Module {
       let seconds = recorder.currentTime
       recorder.stop()
       self.recorder = nil
+      let endingCall = self.activeCallId != nil
       self.endCallIfActive()
       // A recorder that started after a shutdown: release the session again.
       guard self.configured else {
         self.releaseSession()
         return ["uri": recorder.url.absoluteString, "seconds": seconds]
       }
-      let session = AVAudioSession.sharedInstance()
-      try session.setCategory(.playback, mode: .spokenAudio, options: [])
-      try session.setActive(true)
-      try self.restartKeepAliveIfNeeded()
+      // CallKit deactivates the call's audio after this returns; reclaiming it now would be undone
+      // and hand the headphone buttons to another app. callAudioDeactivated restores music mode.
+      if !endingCall { self.restoreMusicMode() }
       return ["uri": recorder.url.absoluteString, "seconds": seconds]
-    }
+    }.runOnQueue(.main)
 
     // A looping silent buffer. iOS routes headphone buttons to the app that is "now playing";
     // when speech is paused the app may lose that role. This keeps it.
@@ -283,7 +283,10 @@ public class T3WalkModeAudioModule: Module {
     let provider = CXProvider(configuration: configuration)
     let delegate = CallDelegate(
       onAudioActivated: { [weak self] in self?.callAudioActivated() },
+      onAudioDeactivated: { [weak self] in self?.callAudioDeactivated() },
       onCallAction: { [weak self] action in
+        // The system ending the call (a stem press) means no call is left for us to end.
+        if action == "end" { self?.activeCallId = nil }
         self?.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
       })
     provider.setDelegate(delegate, queue: nil)
@@ -342,6 +345,12 @@ public class T3WalkModeAudioModule: Module {
       restoreMusicMode()
       promise.reject("E_RECORD", error.localizedDescription)
     }
+  }
+
+  private func callAudioDeactivated() {
+    guard configured, activeCallId == nil, recorder == nil else { return }
+    restoreMusicMode()
+    updateNowPlaying(rate: nowPlayingRate)
   }
 
   private func releaseSession() {
@@ -437,10 +446,16 @@ private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
 
 private final class CallDelegate: NSObject, CXProviderDelegate {
   private let onAudioActivated: () -> Void
+  private let onAudioDeactivated: () -> Void
   private let onCallAction: (String) -> Void
 
-  init(onAudioActivated: @escaping () -> Void, onCallAction: @escaping (String) -> Void) {
+  init(
+    onAudioActivated: @escaping () -> Void,
+    onAudioDeactivated: @escaping () -> Void,
+    onCallAction: @escaping (String) -> Void
+  ) {
     self.onAudioActivated = onAudioActivated
+    self.onAudioDeactivated = onAudioDeactivated
     self.onCallAction = onCallAction
   }
 
@@ -469,5 +484,7 @@ private final class CallDelegate: NSObject, CXProviderDelegate {
     onAudioActivated()
   }
 
-  func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {}
+  func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+    onAudioDeactivated()
+  }
 }
