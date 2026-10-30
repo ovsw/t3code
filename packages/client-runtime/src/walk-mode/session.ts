@@ -16,7 +16,7 @@ import {
 
 export type WalkModeStatus = WalkModeState["kind"];
 
-export type WalkModeSound = "error" | "sent" | "tick" | "thinking";
+export type WalkModeSound = "error" | "sent" | "saved" | "tick" | "thinking";
 
 export type WalkModeAudioEvent =
   | { readonly type: "gesture"; readonly presses: 1 | 2 | 3 }
@@ -407,7 +407,7 @@ export class WalkModeSession {
         if (trimmed.length > 0) {
           this.appendToDraft(trimmed);
           // Without it the walker cannot tell when the text landed; a send plays its own sound.
-          if (!sending && this.headphones) ignoreFailure(this.input.audio.announce("Added."));
+          if (!sending) this.playSound("saved");
         } else {
           this.announce(WALK_MODE_ANNOUNCEMENTS.nothingHeard);
         }

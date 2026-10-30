@@ -26,6 +26,7 @@ public class T3WalkModeAudioModule: Module {
   private let callController = CXCallController()
   private var activeCallId: UUID?
   private var callAudioActive = false
+  private var soundPlayers: [String: AVAudioPlayer] = [:]
   private var pendingCallRecordingPromise: Promise?
   private var pendingCallRecordingURL: URL?
 
@@ -184,13 +185,11 @@ public class T3WalkModeAudioModule: Module {
       if enabled { try self.startKeepAlive() } else { self.stopKeepAlive() }
     }.runOnQueue(.main)
 
+    // Through the app's own session, not AudioServicesPlaySystemSound: system sounds obey the
+    // ring/silent switch while the app is in the foreground, so they went missing with the screen on.
     AsyncFunction("playSound") { (kind: String) in
-      switch kind {
-      case "error": AudioServicesPlaySystemSound(1073)
-      case "sent": AudioServicesPlaySystemSound(1001)
-      default: AudioServicesPlaySystemSound(1057)
-      }
-    }
+      self.playSound(kind)
+    }.runOnQueue(.main)
   }
 
   private func installRemoteCommands() {
@@ -387,6 +386,31 @@ public class T3WalkModeAudioModule: Module {
   private static let headphonePorts: Set<AVAudioSession.Port> = [
     .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .usbAudio,
   ]
+
+  private static let sounds: [String: (file: String, fallback: SystemSoundID)] = [
+    "error": ("ct-error", 1073),
+    "sent": ("mail-sent", 1001),
+    "saved": ("end_record", 1114),
+    "tick": ("Tink", 1057),
+    "thinking": ("Tink", 1057),
+  ]
+
+  private func playSound(_ kind: String) {
+    let sound = Self.sounds[kind] ?? Self.sounds["tick"]!
+    if let player = soundPlayers[kind] {
+      player.currentTime = 0
+      player.play()
+      return
+    }
+    let url = URL(fileURLWithPath: "/System/Library/Audio/UISounds/\(sound.file).caf")
+    guard let player = try? AVAudioPlayer(contentsOf: url) else {
+      AudioServicesPlaySystemSound(sound.fallback)
+      return
+    }
+    player.prepareToPlay()
+    soundPlayers[kind] = player
+    player.play()
+  }
 
   private func isForeground() -> Bool {
     let read = { UIApplication.shared.applicationState == .active }

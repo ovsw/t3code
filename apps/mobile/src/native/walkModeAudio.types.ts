@@ -16,7 +16,7 @@ export interface WalkModeAudio {
   hasWiredInput(): Promise<boolean>;
   startRecording(useCallMode: boolean): Promise<string>;
   stopRecording(): Promise<{ readonly uri: string | null; readonly seconds: number }>;
-  playSound(kind: "error" | "sent" | "tick" | "thinking"): Promise<void>;
+  playSound(kind: "error" | "sent" | "saved" | "tick" | "thinking"): Promise<void>;
   shutdown(): Promise<void>;
   addListener(
     event: "gesture",

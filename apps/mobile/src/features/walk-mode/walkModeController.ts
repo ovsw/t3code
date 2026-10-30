@@ -24,6 +24,7 @@ import { environmentThreadDetails } from "../../state/threads";
 import {
   appendComposerDraftText,
   getComposerDraftSnapshot,
+  rememberComposerDraftSelection,
   setComposerDraftText,
 } from "../../state/use-composer-drafts";
 
@@ -163,7 +164,12 @@ export async function startWalkMode(ref: ScopedThreadRef): Promise<void> {
     turns: threadTurnStream(ref),
     draft: {
       read: () => getComposerDraftSnapshot(draftKey).text,
-      append: (text) => appendComposerDraftText(draftKey, text),
+      append: (text) => {
+        appendComposerDraftText(draftKey, text);
+        // The caret follows the dictated text, so the composer shows it and typing continues after it.
+        const next = getComposerDraftSnapshot(draftKey).text;
+        rememberComposerDraftSelection(draftKey, next, { start: next.length, end: next.length });
+      },
       replace: (text) => setComposerDraftText(draftKey, text),
     },
     send: (text) => sendWalkModeMessage(ref, draftKey, text),
