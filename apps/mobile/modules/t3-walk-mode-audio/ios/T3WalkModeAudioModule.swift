@@ -3,6 +3,7 @@ import AudioToolbox
 import CallKit
 import ExpoModulesCore
 import MediaPlayer
+import UIKit
 
 // Walk mode's audio port: speech, headphone buttons, recording, and the keep-alive with the
 // screen locked. The behavior lives in the Walk mode session in the client runtime.
@@ -24,6 +25,7 @@ public class T3WalkModeAudioModule: Module {
   private var callDelegate: CallDelegate?
   private let callController = CXCallController()
   private var activeCallId: UUID?
+  private var callAudioActive = false
   private var pendingCallRecordingPromise: Promise?
   private var pendingCallRecordingURL: URL?
 
@@ -140,7 +142,8 @@ public class T3WalkModeAudioModule: Module {
           promise.reject("E_MIC_DENIED", "Microphone permission denied")
           return
         }
-        if useCallMode {
+        // iOS refuses to start a plain recording from a background app; only a call may.
+        if useCallMode || !self.isForeground() {
           self.startCallModeRecording(promise: promise)
           return
         }
@@ -163,7 +166,6 @@ public class T3WalkModeAudioModule: Module {
       let seconds = recorder.currentTime
       recorder.stop()
       self.recorder = nil
-      let endingCall = self.activeCallId != nil
       self.endCallIfActive()
       // A recorder that started after a shutdown: release the session again.
       guard self.configured else {
@@ -172,7 +174,7 @@ public class T3WalkModeAudioModule: Module {
       }
       // CallKit deactivates the call's audio after this returns; reclaiming it now would be undone
       // and hand the headphone buttons to another app. callAudioDeactivated restores music mode.
-      if !endingCall { self.restoreMusicMode() }
+      if !self.callAudioActive { self.restoreMusicMode() }
       return ["uri": recorder.url.absoluteString, "seconds": seconds]
     }.runOnQueue(.main)
 
@@ -186,7 +188,6 @@ public class T3WalkModeAudioModule: Module {
       switch kind {
       case "error": AudioServicesPlaySystemSound(1073)
       case "sent": AudioServicesPlaySystemSound(1001)
-      case "saved": AudioServicesPlaySystemSound(1114)
       default: AudioServicesPlaySystemSound(1057)
       }
     }
@@ -336,6 +337,7 @@ public class T3WalkModeAudioModule: Module {
   }
 
   private func callAudioActivated() {
+    callAudioActive = true
     guard let promise = pendingCallRecordingPromise else { return }
     pendingCallRecordingPromise = nil
     do {
@@ -349,6 +351,7 @@ public class T3WalkModeAudioModule: Module {
   }
 
   private func callAudioDeactivated() {
+    callAudioActive = false
     guard configured, activeCallId == nil, recorder == nil else { return }
     restoreMusicMode()
     updateNowPlaying(rate: nowPlayingRate)
@@ -384,6 +387,11 @@ public class T3WalkModeAudioModule: Module {
   private static let headphonePorts: Set<AVAudioSession.Port> = [
     .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .usbAudio,
   ]
+
+  private func isForeground() -> Bool {
+    let read = { UIApplication.shared.applicationState == .active }
+    return Thread.isMainThread ? read() : DispatchQueue.main.sync(execute: read)
+  }
 
   private func hasHeadphones() -> Bool {
     AVAudioSession.sharedInstance().currentRoute.outputs.contains { Self.headphonePorts.contains($0.portType) }

@@ -462,7 +462,7 @@ describe("WalkModeSession: recording", () => {
     expect(audio.take()).toEqual([
       ["playSound", "tick"],
       ["stopRecording"],
-      ["playSound", "saved"],
+      ["announce", "Added."],
     ]);
     expect(draft.text).toBe("Add a login test.");
     expect(session.status).toBe("idle");
@@ -512,7 +512,7 @@ describe("WalkModeSession: recording", () => {
       ["enqueue", ["Second reply."]],
       ["playSound", "tick"],
       ["stopRecording"],
-      ["playSound", "saved"],
+      ["announce", "Added."],
     ]);
   });
 
@@ -540,6 +540,7 @@ describe("WalkModeSession: recording", () => {
     expect(audio.take()).toEqual([
       ["startRecording", true],
       ["playSound", "error"],
+      ["announce", "Recording failed."],
     ]);
     expect(session.status).toBe("paused");
     expect(draft.text).toBe("Keep me.");
@@ -697,7 +698,7 @@ describe("WalkModeSession: sending", () => {
     await rested();
     await audio.until("playSound", "sent");
     expect(sent).toEqual([withWalkModePrefix("Typed first.\n\nSpoken last.")]);
-    expect(audio.take()).not.toContainEqual(["playSound", "saved"]);
+    expect(audio.take()).not.toContainEqual(["announce", "Added."]);
     expect(draft.text).toBe("");
   });
 

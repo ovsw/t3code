@@ -16,7 +16,7 @@ import {
 
 export type WalkModeStatus = WalkModeState["kind"];
 
-export type WalkModeSound = "error" | "sent" | "saved" | "tick" | "thinking";
+export type WalkModeSound = "error" | "sent" | "tick" | "thinking";
 
 export type WalkModeAudioEvent =
   | { readonly type: "gesture"; readonly presses: 1 | 2 | 3 }
@@ -86,6 +86,7 @@ export const WALK_MODE_THINKING_INTERVAL_MS = 4000;
 const WALK_MODE_ANNOUNCEMENTS = {
   sendFailed: "Send failed, your draft is kept.",
   transcriptionFailed: "Transcription failed, recording dropped.",
+  recordingFailed: "Recording failed.",
   nothingHeard: "Nothing heard, draft unchanged.",
   serverUnreachable: "Server unreachable.",
   sendOffline: "Server unreachable, your draft is kept.",
@@ -359,6 +360,9 @@ export class WalkModeSession {
     const { audio } = this.input;
     if (this.input.transcriber === null) {
       this.dispatch({ type: "record.failed" });
+      if (this.headphones) {
+        ignoreFailure(this.input.audio.announce(WALK_MODE_ANNOUNCEMENTS.recordingFailed));
+      }
       return;
     }
     const runId = this.runId;
@@ -380,7 +384,11 @@ export class WalkModeSession {
         }, WALK_MODE_RECORDING_LIMIT_MS);
       },
       () => {
-        if (runId === this.runId) this.dispatch({ type: "record.failed" });
+        if (runId !== this.runId) return;
+        this.dispatch({ type: "record.failed" });
+        if (this.headphones) {
+          ignoreFailure(this.input.audio.announce(WALK_MODE_ANNOUNCEMENTS.recordingFailed));
+        }
       },
     );
   }
@@ -399,7 +407,7 @@ export class WalkModeSession {
         if (trimmed.length > 0) {
           this.appendToDraft(trimmed);
           // Without it the walker cannot tell when the text landed; a send plays its own sound.
-          if (!sending) this.playSound("saved");
+          if (!sending && this.headphones) ignoreFailure(this.input.audio.announce("Added."));
         } else {
           this.announce(WALK_MODE_ANNOUNCEMENTS.nothingHeard);
         }
