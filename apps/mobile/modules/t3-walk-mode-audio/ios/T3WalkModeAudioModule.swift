@@ -186,6 +186,7 @@ public class T3WalkModeAudioModule: Module {
       switch kind {
       case "error": AudioServicesPlaySystemSound(1073)
       case "sent": AudioServicesPlaySystemSound(1001)
+      case "saved": AudioServicesPlaySystemSound(1114)
       default: AudioServicesPlaySystemSound(1057)
       }
     }

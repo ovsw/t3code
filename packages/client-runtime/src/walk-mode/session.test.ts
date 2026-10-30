@@ -459,7 +459,11 @@ describe("WalkModeSession: recording", () => {
     ]);
     audio.press(1);
     await rested();
-    expect(audio.take()).toEqual([["playSound", "tick"], ["stopRecording"]]);
+    expect(audio.take()).toEqual([
+      ["playSound", "tick"],
+      ["stopRecording"],
+      ["playSound", "saved"],
+    ]);
     expect(draft.text).toBe("Add a login test.");
     expect(session.status).toBe("idle");
   });
@@ -508,6 +512,7 @@ describe("WalkModeSession: recording", () => {
       ["enqueue", ["Second reply."]],
       ["playSound", "tick"],
       ["stopRecording"],
+      ["playSound", "saved"],
     ]);
   });
 
@@ -558,6 +563,25 @@ describe("WalkModeSession: recording", () => {
     ]);
     expect(draft.text).toBe("Keep me.");
     expect(session.status).toBe("idle");
+  });
+
+  it("says so when a recording holds no speech, and leaves the draft alone", async () => {
+    const { audio, draft, rested } = await startSession(thread([]), {
+      draft: "Keep me.",
+      transcripts: ["   "],
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.take();
+    audio.press(1);
+    await rested();
+    expect(audio.take()).toEqual([
+      ["playSound", "tick"],
+      ["stopRecording"],
+      ["playSound", "error"],
+      ["announce", "Nothing heard, draft unchanged."],
+    ]);
+    expect(draft.text).toBe("Keep me.");
   });
 
   it("a start that fails after Walk mode restarts leaves the new recording alone", async () => {
@@ -673,6 +697,7 @@ describe("WalkModeSession: sending", () => {
     await rested();
     await audio.until("playSound", "sent");
     expect(sent).toEqual([withWalkModePrefix("Typed first.\n\nSpoken last.")]);
+    expect(audio.take()).not.toContainEqual(["playSound", "saved"]);
     expect(draft.text).toBe("");
   });
 

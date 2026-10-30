@@ -16,7 +16,7 @@ import {
 
 export type WalkModeStatus = WalkModeState["kind"];
 
-export type WalkModeSound = "error" | "sent" | "tick" | "thinking";
+export type WalkModeSound = "error" | "sent" | "saved" | "tick" | "thinking";
 
 export type WalkModeAudioEvent =
   | { readonly type: "gesture"; readonly presses: 1 | 2 | 3 }
@@ -86,6 +86,7 @@ export const WALK_MODE_THINKING_INTERVAL_MS = 4000;
 const WALK_MODE_ANNOUNCEMENTS = {
   sendFailed: "Send failed, your draft is kept.",
   transcriptionFailed: "Transcription failed, recording dropped.",
+  nothingHeard: "Nothing heard, draft unchanged.",
   serverUnreachable: "Server unreachable.",
   sendOffline: "Server unreachable, your draft is kept.",
 } as const;
@@ -394,7 +395,14 @@ export class WalkModeSession {
       (text) => {
         if (runId !== this.runId || !this.running) return;
         const trimmed = text.trim();
-        if (trimmed.length > 0) this.appendToDraft(trimmed);
+        const sending = this.state.kind === "transcribing" && this.state.sendWhenDone;
+        if (trimmed.length > 0) {
+          this.appendToDraft(trimmed);
+          // Without it the walker cannot tell when the text landed; a send plays its own sound.
+          if (!sending) this.playSound("saved");
+        } else {
+          this.announce(WALK_MODE_ANNOUNCEMENTS.nothingHeard);
+        }
         this.dispatch({ type: "transcript.ready" });
       },
       // Also covers a recording stopped while starting whose start then failed.
