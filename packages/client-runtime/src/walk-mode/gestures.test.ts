@@ -11,7 +11,7 @@ import {
 const single: WalkModeEvent = { type: "press.single" };
 const double: WalkModeEvent = { type: "press.double" };
 const triple: WalkModeEvent = { type: "press.triple" };
-const reply: WalkModeEvent = { type: "reply.arrived" };
+const reply: WalkModeEvent = { type: "reply.arrived", readWhilePaused: false };
 
 /** Runs a sequence of events and returns the final state plus every effect in order. */
 function run(events: readonly WalkModeEvent[], start: WalkModeState = initialWalkModeState) {

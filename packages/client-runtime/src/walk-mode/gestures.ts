@@ -24,7 +24,8 @@ export type WalkModeEvent =
   | { readonly type: "press.double" }
   | { readonly type: "press.triple" }
   | { readonly type: "reply.loaded" }
-  | { readonly type: "reply.arrived" }
+  /** `readWhilePaused` starts the reply even though the walker had paused the voice. */
+  | { readonly type: "reply.arrived"; readonly readWhilePaused: boolean }
   | { readonly type: "speech.finished" }
   | { readonly type: "transcript.ready" }
   | { readonly type: "transcript.failed" }
@@ -162,7 +163,11 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
           // The speech layer appends the new reply to what it is already reading.
           return stay;
         case "paused":
-          return stay;
+          if (!event.readWhilePaused) return stay;
+          return {
+            state: { kind: "speaking", hasSpeech: true },
+            effects: [{ type: "speech.start" }],
+          };
         case "recording":
         case "transcribing":
           // Remember there is something to read; the user hears it after a single press.

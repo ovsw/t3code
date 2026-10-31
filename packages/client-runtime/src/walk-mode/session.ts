@@ -69,6 +69,19 @@ export interface WalkModeDraft {
   replace(text: string): void;
 }
 
+/** Read on each use, so a change in Settings applies to the running session. */
+export interface WalkModeSettings {
+  /** A reply that arrives while the voice is paused starts at once instead of waiting for a press. */
+  readonly readNewRepliesWhilePaused: boolean;
+  /** The tone that repeats while a sent message waits for its reply. */
+  readonly thinkingTone: boolean;
+}
+
+export const DEFAULT_WALK_MODE_SETTINGS: WalkModeSettings = {
+  readNewRepliesWhilePaused: true,
+  thinkingTone: true,
+};
+
 export type WalkModeSessionInput = {
   readonly turns: WalkModeTurnStream;
   readonly draft: WalkModeDraft;
@@ -77,6 +90,7 @@ export type WalkModeSessionInput = {
   readonly audio: WalkModeAudioPort;
   readonly transcriber: VoiceTranscriber | null;
   readonly connection: WalkModeConnection;
+  readonly settings: () => WalkModeSettings;
 };
 
 export const WALK_MODE_RECORDING_LIMIT_MS = 5 * 60 * 1000;
@@ -260,7 +274,14 @@ export class WalkModeSession {
       if (this.state.kind === "speaking") this.queueChunks(reply.chunks);
       else this.replaceChunks(reply.chunks);
       // Without headphones the reply waits as paused instead of playing through the speaker.
-      this.dispatch({ type: this.headphones ? "reply.arrived" : "reply.loaded" });
+      this.dispatch(
+        this.headphones
+          ? {
+              type: "reply.arrived",
+              readWhilePaused: this.input.settings().readNewRepliesWhilePaused,
+            }
+          : { type: "reply.loaded" },
+      );
     }
   }
 
@@ -502,7 +523,9 @@ export class WalkModeSession {
     if (turns !== null) this.checkReplyReady(readableWalkModeRuns(turns));
     if (this.awaitedAfterOrdinal === null || this.thinkingTone !== null) return;
     this.thinkingTone = setInterval(() => {
-      if (this.state.kind !== "speaking") this.playSound("thinking");
+      if (this.state.kind !== "speaking" && this.input.settings().thinkingTone) {
+        this.playSound("thinking");
+      }
     }, WALK_MODE_THINKING_INTERVAL_MS);
   }
 

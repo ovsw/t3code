@@ -4,12 +4,14 @@ import type { OrchestrationV2RunStatus } from "@t3tools/contracts";
 
 import type { WalkModeTurnItem, WalkModeTurns } from "./reply.ts";
 import {
+  DEFAULT_WALK_MODE_SETTINGS,
   WALK_MODE_RECORDING_LIMIT_MS,
   WALK_MODE_THINKING_INTERVAL_MS,
   WalkModeSession,
   withWalkModePrefix,
   type WalkModeAudioEvent,
   type WalkModeAudioPort,
+  type WalkModeSettings,
   type WalkModeTurnStream,
 } from "./session.ts";
 
@@ -160,6 +162,7 @@ type SessionOptions = FakeAudioOptions & {
   readonly transcripts?: ReadonlyArray<string | Error>;
   readonly sendFails?: boolean;
   readonly offline?: boolean;
+  readonly settings?: Partial<WalkModeSettings>;
 };
 
 async function startSession(initial: WalkModeTurns | null, options: SessionOptions = {}) {
@@ -169,6 +172,12 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
   const transcripts = [...(options.transcripts ?? ["transcript"])];
   const sent: string[] = [];
   const connection = { connected: !options.offline, listeners: new Set<() => void>() };
+  // Tests keep the press-to-read rule unless they test the setting itself.
+  const settings: WalkModeSettings = {
+    ...DEFAULT_WALK_MODE_SETTINGS,
+    readNewRepliesWhilePaused: false,
+    ...options.settings,
+  };
   const session = new WalkModeSession({
     turns: turns.stream,
     draft: {
@@ -202,6 +211,7 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
         return () => connection.listeners.delete(onChange);
       },
     },
+    settings: () => settings,
   });
   await session.start();
   return {
@@ -210,6 +220,7 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
     turns,
     draft,
     sent,
+    settings,
     setConnected: (connected: boolean) => {
       connection.connected = connected;
       for (const listener of connection.listeners) listener();
@@ -361,6 +372,32 @@ describe("WalkModeSession: replies", () => {
     expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
     audio.finishChunks(1);
     expect(session.status).toBe("idle");
+  });
+
+  it("with the setting on, a reply that completes while paused starts at once", async () => {
+    const { session, audio, turns } = await startSession(thread([latest]), {
+      settings: { readNewRepliesWhilePaused: true },
+    });
+    audio.press(1);
+    audio.press(1);
+    audio.take();
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
+    expect(session.status).toBe("speaking");
+  });
+
+  it("with the setting on, a reply that completes during a recording still waits", async () => {
+    const { session, audio, turns, rested } = await startSession(thread([latest]), {
+      settings: { readNewRepliesWhilePaused: true },
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.take();
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
+    expect(audio.take()).toEqual([]);
+    audio.press(1);
+    await rested();
+    expect(session.status).toBe("paused");
   });
 
   it("a reply that completes before the loaded one was played replaces it", async () => {
@@ -789,6 +826,22 @@ describe("WalkModeSession: sending", () => {
     audio.take();
     vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS * 2);
     expect(audio.take()).toEqual([]);
+  });
+
+  it("the thinking tone stays silent while its setting is off", async () => {
+    vi.useFakeTimers();
+    const { audio, settings } = await startSession(thread([]), {
+      draft: "Go on.",
+      settings: { thinkingTone: false },
+    });
+    audio.press(3);
+    await audio.until("playSound", "sent");
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS * 2);
+    expect(audio.take()).toEqual([]);
+    (settings as { thinkingTone: boolean }).thinkingTone = true;
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS);
+    expect(audio.take()).toEqual([["playSound", "thinking"]]);
   });
 
   it("turning Walk mode off stops the thinking tone", async () => {
