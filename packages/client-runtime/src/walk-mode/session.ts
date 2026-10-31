@@ -92,7 +92,8 @@ const WALK_MODE_ANNOUNCEMENTS = {
 
 const WALK_MODE_MESSAGE_PREFIX =
   "[Walk mode: I dictated this by voice, so expect transcription mistakes. Your reply is read aloud to me. " +
-  "Answer in short, plain spoken paragraphs, with no code and no lists, and ask one question at a time.]";
+  "Answer in short, plain spoken paragraphs, with no code and no lists, and ask one question at a time. " +
+  "Never write a bare URL: write every link as [words that say what it is](url), because only the words are read aloud.]";
 
 /** Added at send time only, so the draft keeps the walker's own words. */
 export function withWalkModePrefix(text: string): string {
