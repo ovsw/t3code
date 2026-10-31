@@ -16,7 +16,7 @@ import {
 
 export type WalkModeStatus = WalkModeState["kind"];
 
-export type WalkModeSound = "error" | "sent" | "tick" | "thinking";
+export type WalkModeSound = "error" | "sent" | "saved" | "tick" | "thinking";
 
 export type WalkModeAudioEvent =
   | { readonly type: "gesture"; readonly presses: 1 | 2 | 3 }
@@ -31,8 +31,6 @@ export interface WalkModeAudioPort {
   configureSession(): Promise<void>;
   /** Replaces whatever is queued with these chunks and starts speaking. */
   speak(chunks: readonly string[]): Promise<void>;
-  /** Queues chunks after the ones already loaded, keeping the pause state. */
-  enqueue(chunks: readonly string[]): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   /** Speaks one sentence beside the reply queue, which keeps its place and pause state. */
@@ -69,6 +67,19 @@ export interface WalkModeDraft {
   replace(text: string): void;
 }
 
+/** Read on each use, so a change in Settings applies to the running session. */
+export interface WalkModeSettings {
+  /** A reply that arrives while the voice is paused starts at once instead of waiting for a press. */
+  readonly readNewRepliesWhilePaused: boolean;
+  /** The tone that repeats while a sent message waits for its reply. */
+  readonly thinkingTone: boolean;
+}
+
+export const DEFAULT_WALK_MODE_SETTINGS: WalkModeSettings = {
+  readNewRepliesWhilePaused: true,
+  thinkingTone: true,
+};
+
 export type WalkModeSessionInput = {
   readonly turns: WalkModeTurnStream;
   readonly draft: WalkModeDraft;
@@ -77,6 +88,7 @@ export type WalkModeSessionInput = {
   readonly audio: WalkModeAudioPort;
   readonly transcriber: VoiceTranscriber | null;
   readonly connection: WalkModeConnection;
+  readonly settings: () => WalkModeSettings;
 };
 
 export const WALK_MODE_RECORDING_LIMIT_MS = 5 * 60 * 1000;
@@ -86,6 +98,8 @@ export const WALK_MODE_THINKING_INTERVAL_MS = 4000;
 const WALK_MODE_ANNOUNCEMENTS = {
   sendFailed: "Send failed, your draft is kept.",
   transcriptionFailed: "Transcription failed, recording dropped.",
+  recordingFailed: "Recording failed.",
+  nothingHeard: "Nothing heard, draft unchanged.",
   serverUnreachable: "Server unreachable.",
   sendOffline: "Server unreachable, your draft is kept.",
 } as const;
@@ -127,8 +141,10 @@ export class WalkModeSession {
   private readonly seenRuns = new Set<string>();
   private baselineTaken = false;
   private title: string | null = null;
-  /** Chunks of replies not yet handed to the audio port. */
+  /** The newest unread reply, not yet handed to the audio port. */
   private pendingChunks: string[] = [];
+  /** The newest reply, read again by one press once speech has finished. */
+  private latestReplyChunks: readonly string[] = [];
   /** Chunks handed to the audio port that have not finished yet. */
   private loadedChunks = 0;
   /** Settles true once the native recorder runs, false when it could not start. */
@@ -165,6 +181,7 @@ export class WalkModeSession {
     this.headphones = true;
     // A restart begins like a first start: silent, with the latest reply loaded as paused.
     this.title = null;
+    this.latestReplyChunks = [];
     this.baselineTaken = false;
     this.seenRuns.clear();
     const { audio, turns, connection } = this.input;
@@ -238,6 +255,7 @@ export class WalkModeSession {
         if (reply === null) continue;
         for (const run of readable.slice(0, index + 1)) this.seenRuns.add(run.id);
         this.pendingChunks.push(...reply.chunks);
+        this.latestReplyChunks = reply.chunks;
         this.dispatch({ type: "reply.loaded" });
         break;
       }
@@ -248,9 +266,20 @@ export class WalkModeSession {
       const reply = walkModeReplyForRun(turns, run.id);
       if (reply === null) continue;
       this.seenRuns.add(run.id);
-      this.queueChunks(reply.chunks);
+      this.latestReplyChunks = reply.chunks;
+      // Only the newest unread reply is kept. The voice finishes what it reads first; once
+      // paused, the rest of the old reply is stale: the walker moved on.
+      this.pendingChunks = [...reply.chunks];
+      if (this.state.kind !== "speaking") this.loadedChunks = 0;
       // Without headphones the reply waits as paused instead of playing through the speaker.
-      this.dispatch({ type: this.headphones ? "reply.arrived" : "reply.loaded" });
+      this.dispatch(
+        this.headphones
+          ? {
+              type: "reply.arrived",
+              readWhilePaused: this.input.settings().readNewRepliesWhilePaused,
+            }
+          : { type: "reply.loaded" },
+      );
     }
   }
 
@@ -270,15 +299,6 @@ export class WalkModeSession {
     if (!this.headphones) return;
     this.playSound("error");
     ignoreFailure(this.input.audio.announce(sentence));
-  }
-
-  private queueChunks(chunks: readonly string[]): void {
-    if (this.loadedChunks === 0) {
-      this.pendingChunks.push(...chunks);
-      return;
-    }
-    this.loadedChunks += chunks.length;
-    ignoreFailure(this.input.audio.enqueue(chunks));
   }
 
   private speakPending(): void {
@@ -301,7 +321,10 @@ export class WalkModeSession {
       case "chunk-finished":
         if (this.loadedChunks === 0) return;
         this.loadedChunks -= 1;
-        if (this.loadedChunks === 0) this.dispatch({ type: "speech.finished" });
+        if (this.loadedChunks > 0) return;
+        // A reply that arrived during this one follows it without a press.
+        if (this.state.kind === "speaking" && this.pendingChunks.length > 0) this.speakPending();
+        else this.dispatch({ type: "speech.finished" });
         return;
       case "route": {
         const lost = this.headphones && !event.headphones;
@@ -325,6 +348,15 @@ export class WalkModeSession {
         if (this.loadedChunks > 0) ignoreFailure(audio.resume());
         else this.speakPending();
         return;
+      case "speech.replay":
+        if (this.latestReplyChunks.length === 0) {
+          this.playSound("error");
+          this.dispatch({ type: "speech.finished" });
+          return;
+        }
+        this.pendingChunks = [...this.latestReplyChunks];
+        this.speakPending();
+        return;
       case "record.start":
         this.startRecording();
         return;
@@ -344,6 +376,9 @@ export class WalkModeSession {
     const { audio } = this.input;
     if (this.input.transcriber === null) {
       this.dispatch({ type: "record.failed" });
+      if (this.headphones) {
+        ignoreFailure(this.input.audio.announce(WALK_MODE_ANNOUNCEMENTS.recordingFailed));
+      }
       return;
     }
     const runId = this.runId;
@@ -365,7 +400,11 @@ export class WalkModeSession {
         }, WALK_MODE_RECORDING_LIMIT_MS);
       },
       () => {
-        if (runId === this.runId) this.dispatch({ type: "record.failed" });
+        if (runId !== this.runId) return;
+        this.dispatch({ type: "record.failed" });
+        if (this.headphones) {
+          ignoreFailure(this.input.audio.announce(WALK_MODE_ANNOUNCEMENTS.recordingFailed));
+        }
       },
     );
   }
@@ -380,7 +419,14 @@ export class WalkModeSession {
       (text) => {
         if (runId !== this.runId || !this.running) return;
         const trimmed = text.trim();
-        if (trimmed.length > 0) this.appendToDraft(trimmed);
+        const sending = this.state.kind === "transcribing" && this.state.sendWhenDone;
+        if (trimmed.length > 0) {
+          this.appendToDraft(trimmed);
+          // Without it the walker cannot tell when the text landed; a send plays its own sound.
+          if (!sending) this.playSound("saved");
+        } else {
+          this.announce(WALK_MODE_ANNOUNCEMENTS.nothingHeard);
+        }
         this.dispatch({ type: "transcript.ready" });
       },
       // Also covers a recording stopped while starting whose start then failed.
@@ -463,7 +509,9 @@ export class WalkModeSession {
     if (turns !== null) this.checkReplyReady(readableWalkModeRuns(turns));
     if (this.awaitedAfterOrdinal === null || this.thinkingTone !== null) return;
     this.thinkingTone = setInterval(() => {
-      if (this.state.kind !== "speaking") this.playSound("thinking");
+      if (this.state.kind !== "speaking" && this.input.settings().thinkingTone) {
+        this.playSound("thinking");
+      }
     }, WALK_MODE_THINKING_INTERVAL_MS);
   }
 

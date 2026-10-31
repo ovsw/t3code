@@ -1,16 +1,19 @@
 import { useSyncExternalStore } from "react";
 
 import {
+  DEFAULT_WALK_MODE_SETTINGS,
   WalkModeSession,
   walkModeTurnsFromProjection,
   withWalkModePrefix,
   type WalkModeAudioPort,
   type WalkModeConnection,
+  type WalkModeSettings,
   type WalkModeStatus,
   type WalkModeTurns,
   type WalkModeTurnStream,
 } from "@t3tools/client-runtime/walk-mode";
 import { CommandId, MessageId, type ScopedThreadRef } from "@t3tools/contracts";
+import { AsyncResult } from "effect/reactivity";
 
 import { makeQueuedMessageMetadata } from "../../lib/commandMetadata";
 import { scopedThreadKey } from "../../lib/scopedEntities";
@@ -18,12 +21,14 @@ import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
 import { walkModeAudio } from "../../native/walkModeAudio";
 import type { WalkModeAudio } from "../../native/walkModeAudio.types";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { mobilePreferencesAtom } from "../../state/preferences";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { environmentConnectedAtom } from "../../state/use-remote-environment-registry";
 import { environmentThreadDetails } from "../../state/threads";
 import {
   appendComposerDraftText,
   getComposerDraftSnapshot,
+  rememberComposerDraftSelection,
   setComposerDraftText,
 } from "../../state/use-composer-drafts";
 
@@ -31,7 +36,6 @@ function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
   return {
     configureSession: () => audio.configureSession(),
     speak: (chunks) => audio.speak(chunks),
-    enqueue: (chunks) => audio.enqueue(chunks),
     pause: () => audio.pause(),
     resume: () => audio.resume(),
     announce: (text) => audio.announce(text),
@@ -103,6 +107,17 @@ function threadTurnStream(ref: ScopedThreadRef): WalkModeTurnStream {
   };
 }
 
+export function walkModeSettings(): WalkModeSettings {
+  const result = appAtomRegistry.get(mobilePreferencesAtom);
+  const preferences = AsyncResult.isSuccess(result) ? result.value : {};
+  return {
+    readNewRepliesWhilePaused:
+      preferences.walkModeReadNewRepliesWhilePaused ??
+      DEFAULT_WALK_MODE_SETTINGS.readNewRepliesWhilePaused,
+    thinkingTone: preferences.walkModeThinkingTone ?? DEFAULT_WALK_MODE_SETTINGS.thinkingTone,
+  };
+}
+
 function environmentConnection(ref: ScopedThreadRef): WalkModeConnection {
   const atom = environmentConnectedAtom(ref.environmentId);
   return {
@@ -163,13 +178,19 @@ export async function startWalkMode(ref: ScopedThreadRef): Promise<void> {
     turns: threadTurnStream(ref),
     draft: {
       read: () => getComposerDraftSnapshot(draftKey).text,
-      append: (text) => appendComposerDraftText(draftKey, text),
+      append: (text) => {
+        appendComposerDraftText(draftKey, text);
+        // The caret follows the dictated text, so the composer shows it and typing continues after it.
+        const next = getComposerDraftSnapshot(draftKey).text;
+        rememberComposerDraftSelection(draftKey, next, { start: next.length, end: next.length });
+      },
       replace: (text) => setComposerDraftText(draftKey, text),
     },
     send: (text) => sendWalkModeMessage(ref, draftKey, text),
     audio: nativeAudioPort(walkModeAudio),
     transcriber: getLocalVoiceTranscriber(),
     connection: environmentConnection(ref),
+    settings: walkModeSettings,
   });
   const current: ActiveWalkMode = {
     threadKey: draftKey,

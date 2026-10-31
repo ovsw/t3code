@@ -4,12 +4,14 @@ import type { OrchestrationV2RunStatus } from "@t3tools/contracts";
 
 import type { WalkModeTurnItem, WalkModeTurns } from "./reply.ts";
 import {
+  DEFAULT_WALK_MODE_SETTINGS,
   WALK_MODE_RECORDING_LIMIT_MS,
   WALK_MODE_THINKING_INTERVAL_MS,
   WalkModeSession,
   withWalkModePrefix,
   type WalkModeAudioEvent,
   type WalkModeAudioPort,
+  type WalkModeSettings,
   type WalkModeTurnStream,
 } from "./session.ts";
 
@@ -60,7 +62,6 @@ function fakeAudio(options: FakeAudioOptions = {}) {
   const port: WalkModeAudioPort = {
     configureSession: record("configureSession"),
     speak: record("speak"),
-    enqueue: record("enqueue"),
     pause: record("pause"),
     resume: record("resume"),
     announce: record("announce"),
@@ -160,6 +161,7 @@ type SessionOptions = FakeAudioOptions & {
   readonly transcripts?: ReadonlyArray<string | Error>;
   readonly sendFails?: boolean;
   readonly offline?: boolean;
+  readonly settings?: Partial<WalkModeSettings>;
 };
 
 async function startSession(initial: WalkModeTurns | null, options: SessionOptions = {}) {
@@ -169,6 +171,12 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
   const transcripts = [...(options.transcripts ?? ["transcript"])];
   const sent: string[] = [];
   const connection = { connected: !options.offline, listeners: new Set<() => void>() };
+  // Tests keep the press-to-read rule unless they test the setting itself.
+  const settings: WalkModeSettings = {
+    ...DEFAULT_WALK_MODE_SETTINGS,
+    readNewRepliesWhilePaused: false,
+    ...options.settings,
+  };
   const session = new WalkModeSession({
     turns: turns.stream,
     draft: {
@@ -202,6 +210,7 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
         return () => connection.listeners.delete(onChange);
       },
     },
+    settings: () => settings,
   });
   await session.start();
   return {
@@ -210,6 +219,7 @@ async function startSession(initial: WalkModeTurns | null, options: SessionOptio
     turns,
     draft,
     sent,
+    settings,
     setConnected: (connected: boolean) => {
       connection.connected = connected;
       for (const listener of connection.listeners) listener();
@@ -243,13 +253,13 @@ describe("WalkModeSession: start and stop", () => {
     expect(session.status).toBe("paused");
   });
 
-  it("starts idle when the thread has no completed reply, and a press does nothing", async () => {
+  it("starts idle when the thread has no completed reply, and a press plays the error sound", async () => {
     const running = turn("run-1", 1, "running", "Half a thought");
     const { session, audio } = await startSession(thread([running]));
     audio.take();
     audio.press(1);
     expect(session.status).toBe("idle");
-    expect(audio.take()).toEqual([]);
+    expect(audio.take()).toEqual([["playSound", "error"]]);
   });
 
   it("stop ends speech, turns the keep-alive off, and ignores later presses and replies", async () => {
@@ -307,7 +317,7 @@ describe("WalkModeSession: presses", () => {
     expect(session.status).toBe("speaking");
   });
 
-  it("presses toggle pause and resume, and the reply ends in idle", async () => {
+  it("presses toggle pause and resume, the reply ends in idle, and one more press replays it", async () => {
     const { session, audio } = await startSession(thread([latest]));
     audio.press(1);
     audio.take();
@@ -319,7 +329,8 @@ describe("WalkModeSession: presses", () => {
     audio.finishChunks(2);
     expect(session.status).toBe("idle");
     audio.press(1);
-    expect(audio.take()).toEqual([]);
+    expect(audio.take()).toEqual([["speak", ["The login works now.", "Try it again."]]]);
+    expect(session.status).toBe("speaking");
   });
 });
 
@@ -336,28 +347,72 @@ describe("WalkModeSession: replies", () => {
     expect(session.status).toBe("speaking");
   });
 
-  it("queues a reply that completes while another is being read", async () => {
+  it("reads only the newest reply that completes while another is being read, after it", async () => {
     const { session, audio, turns } = await startSession(thread([latest]));
     audio.press(1);
     audio.take();
     turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
-    expect(audio.take()).toEqual([["enqueue", ["Second reply."]]]);
+    turns.set(
+      thread([
+        latest,
+        turn("run-3", 3, "completed", "Second reply."),
+        turn("run-4", 4, "completed", "Third reply."),
+      ]),
+    );
+    expect(audio.take()).toEqual([]);
     audio.finishChunks(2);
+    expect(audio.take()).toEqual([["speak", ["Third reply."]]]);
     expect(session.status).toBe("speaking");
     audio.finishChunks(1);
     expect(session.status).toBe("idle");
   });
 
-  it("keeps a reply that completes while paused waiting until the next press", async () => {
+  it("a reply that completes while paused replaces the unread rest and waits for one press", async () => {
     const { session, audio, turns } = await startSession(thread([latest]));
+    audio.press(1);
+    audio.press(1);
     audio.take();
     turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
     expect(audio.take()).toEqual([]);
     expect(session.status).toBe("paused");
     audio.press(1);
-    expect(audio.take()).toEqual([
-      ["speak", ["The login works now.", "Try it again.", "Second reply."]],
-    ]);
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
+    audio.finishChunks(1);
+    expect(session.status).toBe("idle");
+  });
+
+  it("with the setting on, a reply that completes while paused starts at once", async () => {
+    const { session, audio, turns } = await startSession(thread([latest]), {
+      settings: { readNewRepliesWhilePaused: true },
+    });
+    audio.press(1);
+    audio.press(1);
+    audio.take();
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
+    expect(session.status).toBe("speaking");
+  });
+
+  it("with the setting on, a reply that completes during a recording still waits", async () => {
+    const { session, audio, turns, rested } = await startSession(thread([latest]), {
+      settings: { readNewRepliesWhilePaused: true },
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.take();
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
+    expect(audio.take()).toEqual([]);
+    audio.press(1);
+    await rested();
+    expect(session.status).toBe("paused");
+  });
+
+  it("a reply that completes before the loaded one was played replaces it", async () => {
+    const { audio, turns } = await startSession(thread([latest]));
+    audio.take();
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
+    audio.press(1);
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
   });
 
   it("speaks a new reply at once after the previous one finished", async () => {
@@ -458,7 +513,11 @@ describe("WalkModeSession: recording", () => {
     ]);
     audio.press(1);
     await rested();
-    expect(audio.take()).toEqual([["playSound", "tick"], ["stopRecording"]]);
+    expect(audio.take()).toEqual([
+      ["playSound", "tick"],
+      ["stopRecording"],
+      ["playSound", "saved"],
+    ]);
     expect(draft.text).toBe("Add a login test.");
     expect(session.status).toBe("idle");
   });
@@ -504,10 +563,12 @@ describe("WalkModeSession: recording", () => {
     expect(audio.take()).toEqual([
       ["startRecording", true],
       ["playSound", "tick"],
-      ["enqueue", ["Second reply."]],
       ["playSound", "tick"],
       ["stopRecording"],
+      ["playSound", "saved"],
     ]);
+    audio.press(1);
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
   });
 
   it("stops by itself after five minutes, like a manual stop", async () => {
@@ -534,6 +595,7 @@ describe("WalkModeSession: recording", () => {
     expect(audio.take()).toEqual([
       ["startRecording", true],
       ["playSound", "error"],
+      ["announce", "Recording failed."],
     ]);
     expect(session.status).toBe("paused");
     expect(draft.text).toBe("Keep me.");
@@ -557,6 +619,25 @@ describe("WalkModeSession: recording", () => {
     ]);
     expect(draft.text).toBe("Keep me.");
     expect(session.status).toBe("idle");
+  });
+
+  it("says so when a recording holds no speech, and leaves the draft alone", async () => {
+    const { audio, draft, rested } = await startSession(thread([]), {
+      draft: "Keep me.",
+      transcripts: ["   "],
+    });
+    audio.press(2);
+    await audio.until("playSound", "tick");
+    audio.take();
+    audio.press(1);
+    await rested();
+    expect(audio.take()).toEqual([
+      ["playSound", "tick"],
+      ["stopRecording"],
+      ["playSound", "error"],
+      ["announce", "Nothing heard, draft unchanged."],
+    ]);
+    expect(draft.text).toBe("Keep me.");
   });
 
   it("a start that fails after Walk mode restarts leaves the new recording alone", async () => {
@@ -672,6 +753,7 @@ describe("WalkModeSession: sending", () => {
     await rested();
     await audio.until("playSound", "sent");
     expect(sent).toEqual([withWalkModePrefix("Typed first.\n\nSpoken last.")]);
+    expect(audio.take()).not.toContainEqual(["playSound", "saved"]);
     expect(draft.text).toBe("");
   });
 
@@ -753,6 +835,22 @@ describe("WalkModeSession: sending", () => {
     expect(audio.take()).toEqual([]);
   });
 
+  it("the thinking tone stays silent while its setting is off", async () => {
+    vi.useFakeTimers();
+    const { audio, settings } = await startSession(thread([]), {
+      draft: "Go on.",
+      settings: { thinkingTone: false },
+    });
+    audio.press(3);
+    await audio.until("playSound", "sent");
+    audio.take();
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS * 2);
+    expect(audio.take()).toEqual([]);
+    (settings as { thinkingTone: boolean }).thinkingTone = true;
+    vi.advanceTimersByTime(WALK_MODE_THINKING_INTERVAL_MS);
+    expect(audio.take()).toEqual([["playSound", "thinking"]]);
+  });
+
   it("turning Walk mode off stops the thinking tone", async () => {
     vi.useFakeTimers();
     const { session, audio } = await startSession(thread([]), { draft: "Hi." });
@@ -777,11 +875,11 @@ describe("WalkModeSession: headphones", () => {
     audio.press(1);
     audio.press(3);
     expect(session.status).toBe("paused");
-    expect(audio.take()).toEqual([["enqueue", ["Second reply."]]]);
+    expect(audio.take()).toEqual([]);
     audio.headphones(true);
     audio.press(1);
     expect(session.status).toBe("speaking");
-    expect(audio.take()).toEqual([["resume"]]);
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
   });
 
   it("a reply that completes without them waits as paused", async () => {

@@ -3,6 +3,7 @@ import AudioToolbox
 import CallKit
 import ExpoModulesCore
 import MediaPlayer
+import UIKit
 
 // Walk mode's audio port: speech, headphone buttons, recording, and the keep-alive with the
 // screen locked. The behavior lives in the Walk mode session in the client runtime.
@@ -24,6 +25,8 @@ public class T3WalkModeAudioModule: Module {
   private var callDelegate: CallDelegate?
   private let callController = CXCallController()
   private var activeCallId: UUID?
+  private var callAudioActive = false
+  private var soundPlayers: [String: AVAudioPlayer] = [:]
   private var pendingCallRecordingPromise: Promise?
   private var pendingCallRecordingURL: URL?
 
@@ -68,11 +71,6 @@ public class T3WalkModeAudioModule: Module {
       self.pendingUtterances = 0
       self.queueUtterances(chunks)
       self.updateNowPlaying(rate: 1)
-    }
-
-    // Appends after what is loaded; a paused synthesizer stays paused.
-    AsyncFunction("enqueue") { (chunks: [String]) in
-      self.queueUtterances(chunks)
     }
 
     AsyncFunction("setNowPlayingTitle") { (title: String) in
@@ -140,7 +138,8 @@ public class T3WalkModeAudioModule: Module {
           promise.reject("E_MIC_DENIED", "Microphone permission denied")
           return
         }
-        if useCallMode {
+        // iOS refuses to start a plain recording from a background app; only a call may.
+        if useCallMode || !self.isForeground() {
           self.startCallModeRecording(promise: promise)
           return
         }
@@ -169,12 +168,11 @@ public class T3WalkModeAudioModule: Module {
         self.releaseSession()
         return ["uri": recorder.url.absoluteString, "seconds": seconds]
       }
-      let session = AVAudioSession.sharedInstance()
-      try session.setCategory(.playback, mode: .spokenAudio, options: [])
-      try session.setActive(true)
-      try self.restartKeepAliveIfNeeded()
+      // CallKit deactivates the call's audio after this returns; reclaiming it now would be undone
+      // and hand the headphone buttons to another app. callAudioDeactivated restores music mode.
+      if !self.callAudioActive { self.restoreMusicMode() }
       return ["uri": recorder.url.absoluteString, "seconds": seconds]
-    }
+    }.runOnQueue(.main)
 
     // A looping silent buffer. iOS routes headphone buttons to the app that is "now playing";
     // when speech is paused the app may lose that role. This keeps it.
@@ -182,13 +180,11 @@ public class T3WalkModeAudioModule: Module {
       if enabled { try self.startKeepAlive() } else { self.stopKeepAlive() }
     }.runOnQueue(.main)
 
+    // Through the app's own session, not AudioServicesPlaySystemSound: system sounds obey the
+    // ring/silent switch while the app is in the foreground, so they went missing with the screen on.
     AsyncFunction("playSound") { (kind: String) in
-      switch kind {
-      case "error": AudioServicesPlaySystemSound(1073)
-      case "sent": AudioServicesPlaySystemSound(1001)
-      default: AudioServicesPlaySystemSound(1057)
-      }
-    }
+      self.playSound(kind)
+    }.runOnQueue(.main)
   }
 
   private func installRemoteCommands() {
@@ -283,7 +279,11 @@ public class T3WalkModeAudioModule: Module {
     let provider = CXProvider(configuration: configuration)
     let delegate = CallDelegate(
       onAudioActivated: { [weak self] in self?.callAudioActivated() },
-      onCallAction: { [weak self] action in
+      onAudioDeactivated: { [weak self] in self?.callAudioDeactivated() },
+      onCallAction: { [weak self] action, callId in
+        // The system ending the call (a stem press) means no call is left for us to end.
+        // A newer call keeps its id when the end action of an older one arrives late.
+        if action == "end", self?.activeCallId == callId { self?.activeCallId = nil }
         self?.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
       })
     provider.setDelegate(delegate, queue: nil)
@@ -332,6 +332,7 @@ public class T3WalkModeAudioModule: Module {
   }
 
   private func callAudioActivated() {
+    callAudioActive = true
     guard let promise = pendingCallRecordingPromise else { return }
     pendingCallRecordingPromise = nil
     do {
@@ -342,6 +343,13 @@ public class T3WalkModeAudioModule: Module {
       restoreMusicMode()
       promise.reject("E_RECORD", error.localizedDescription)
     }
+  }
+
+  private func callAudioDeactivated() {
+    callAudioActive = false
+    guard configured, activeCallId == nil, recorder == nil else { return }
+    restoreMusicMode()
+    updateNowPlaying(rate: nowPlayingRate)
   }
 
   private func releaseSession() {
@@ -374,6 +382,36 @@ public class T3WalkModeAudioModule: Module {
   private static let headphonePorts: Set<AVAudioSession.Port> = [
     .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .usbAudio,
   ]
+
+  private static let sounds: [String: (file: String, fallback: SystemSoundID)] = [
+    "error": ("ct-error", 1073),
+    "sent": ("mail-sent", 1001),
+    "saved": ("end_record", 1114),
+    "tick": ("Tink", 1057),
+    "thinking": ("Tink", 1057),
+  ]
+
+  private func playSound(_ kind: String) {
+    let sound = Self.sounds[kind] ?? Self.sounds["tick"]!
+    if let player = soundPlayers[kind] {
+      player.currentTime = 0
+      player.play()
+      return
+    }
+    let url = URL(fileURLWithPath: "/System/Library/Audio/UISounds/\(sound.file).caf")
+    guard let player = try? AVAudioPlayer(contentsOf: url) else {
+      AudioServicesPlaySystemSound(sound.fallback)
+      return
+    }
+    player.prepareToPlay()
+    soundPlayers[kind] = player
+    player.play()
+  }
+
+  private func isForeground() -> Bool {
+    let read = { UIApplication.shared.applicationState == .active }
+    return Thread.isMainThread ? read() : DispatchQueue.main.sync(execute: read)
+  }
 
   private func hasHeadphones() -> Bool {
     AVAudioSession.sharedInstance().currentRoute.outputs.contains { Self.headphonePorts.contains($0.portType) }
@@ -437,10 +475,16 @@ private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
 
 private final class CallDelegate: NSObject, CXProviderDelegate {
   private let onAudioActivated: () -> Void
-  private let onCallAction: (String) -> Void
+  private let onAudioDeactivated: () -> Void
+  private let onCallAction: (String, UUID) -> Void
 
-  init(onAudioActivated: @escaping () -> Void, onCallAction: @escaping (String) -> Void) {
+  init(
+    onAudioActivated: @escaping () -> Void,
+    onAudioDeactivated: @escaping () -> Void,
+    onCallAction: @escaping (String, UUID) -> Void
+  ) {
     self.onAudioActivated = onAudioActivated
+    self.onAudioDeactivated = onAudioDeactivated
     self.onCallAction = onCallAction
   }
 
@@ -451,17 +495,17 @@ private final class CallDelegate: NSObject, CXProviderDelegate {
   }
 
   func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-    onCallAction("end")
+    onCallAction("end", action.callUUID)
     action.fulfill()
   }
 
   func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
-    onCallAction(action.isMuted ? "mute" : "unmute")
+    onCallAction(action.isMuted ? "mute" : "unmute", action.callUUID)
     action.fulfill()
   }
 
   func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
-    onCallAction(action.isOnHold ? "hold" : "unhold")
+    onCallAction(action.isOnHold ? "hold" : "unhold", action.callUUID)
     action.fulfill()
   }
 
@@ -469,5 +513,7 @@ private final class CallDelegate: NSObject, CXProviderDelegate {
     onAudioActivated()
   }
 
-  func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {}
+  func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+    onAudioDeactivated()
+  }
 }

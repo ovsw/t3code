@@ -24,7 +24,8 @@ export type WalkModeEvent =
   | { readonly type: "press.double" }
   | { readonly type: "press.triple" }
   | { readonly type: "reply.loaded" }
-  | { readonly type: "reply.arrived" }
+  /** `readWhilePaused` starts the reply even though the walker had paused the voice. */
+  | { readonly type: "reply.arrived"; readonly readWhilePaused: boolean }
   | { readonly type: "speech.finished" }
   | { readonly type: "transcript.ready" }
   | { readonly type: "transcript.failed" }
@@ -36,6 +37,8 @@ export type WalkModeEffect =
   | { readonly type: "speech.start" }
   | { readonly type: "speech.pause" }
   | { readonly type: "speech.resume" }
+  /** Reads the latest reply again; the host plays the error sound when there is none. */
+  | { readonly type: "speech.replay" }
   | { readonly type: "record.start" }
   | { readonly type: "record.stop" }
   /** Sends the composer draft; the host plays the error sound when it is empty. */
@@ -87,6 +90,10 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
           // Any press stops a recording: in call mode presses arrive without a count.
           return stopRecording(state);
         case "idle":
+          return {
+            state: { kind: "speaking", hasSpeech: true },
+            effects: [{ type: "speech.replay" }],
+          };
         case "transcribing":
           return stay;
       }
@@ -156,7 +163,11 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
           // The speech layer appends the new reply to what it is already reading.
           return stay;
         case "paused":
-          return stay;
+          if (!event.readWhilePaused) return stay;
+          return {
+            state: { kind: "speaking", hasSpeech: true },
+            effects: [{ type: "speech.start" }],
+          };
         case "recording":
         case "transcribing":
           // Remember there is something to read; the user hears it after a single press.

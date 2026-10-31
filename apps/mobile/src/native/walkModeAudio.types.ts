@@ -7,7 +7,6 @@ export type WalkModeSessionEvent = { readonly type: "route"; readonly headphones
 export interface WalkModeAudio {
   configureSession(): Promise<void>;
   speak(chunks: readonly string[]): Promise<void>;
-  enqueue(chunks: readonly string[]): Promise<void>;
   setNowPlayingTitle(title: string): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -16,7 +15,7 @@ export interface WalkModeAudio {
   hasWiredInput(): Promise<boolean>;
   startRecording(useCallMode: boolean): Promise<string>;
   stopRecording(): Promise<{ readonly uri: string | null; readonly seconds: number }>;
-  playSound(kind: "error" | "sent" | "tick" | "thinking"): Promise<void>;
+  playSound(kind: "error" | "sent" | "saved" | "tick" | "thinking"): Promise<void>;
   shutdown(): Promise<void>;
   addListener(
     event: "gesture",

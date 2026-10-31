@@ -11,7 +11,7 @@ import {
 const single: WalkModeEvent = { type: "press.single" };
 const double: WalkModeEvent = { type: "press.double" };
 const triple: WalkModeEvent = { type: "press.triple" };
-const reply: WalkModeEvent = { type: "reply.arrived" };
+const reply: WalkModeEvent = { type: "reply.arrived", readWhilePaused: false };
 
 /** Runs a sequence of events and returns the final state plus every effect in order. */
 function run(events: readonly WalkModeEvent[], start: WalkModeState = initialWalkModeState) {
@@ -44,10 +44,10 @@ describe("walk mode: listening", () => {
     expect(effectTypes).toEqual(["speech.resume"]);
   });
 
-  it("one press while idle does nothing", () => {
-    const { state, effects } = run([single]);
-    expect(state).toEqual(initialWalkModeState);
-    expect(effects).toEqual([]);
+  it("one press while idle replays the latest reply", () => {
+    const { state, effectTypes } = run([single]);
+    expect(state).toEqual({ kind: "speaking", hasSpeech: true });
+    expect(effectTypes).toEqual(["speech.replay"]);
   });
 
   it("goes idle when speech finishes", () => {

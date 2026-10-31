@@ -12,6 +12,7 @@ export {
   type WalkModeTurns,
 } from "./reply.ts";
 export {
+  DEFAULT_WALK_MODE_SETTINGS,
   WalkModeSession,
   withWalkModePrefix,
   type WalkModeAudioEvent,
@@ -19,6 +20,7 @@ export {
   type WalkModeConnection,
   type WalkModeDraft,
   type WalkModeSessionInput,
+  type WalkModeSettings,
   type WalkModeSound,
   type WalkModeStatus,
   type WalkModeTurnStream,
