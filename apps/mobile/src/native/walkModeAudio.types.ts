@@ -7,7 +7,6 @@ export type WalkModeSessionEvent = { readonly type: "route"; readonly headphones
 export interface WalkModeAudio {
   configureSession(): Promise<void>;
   speak(chunks: readonly string[]): Promise<void>;
-  enqueue(chunks: readonly string[]): Promise<void>;
   setNowPlayingTitle(title: string): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;

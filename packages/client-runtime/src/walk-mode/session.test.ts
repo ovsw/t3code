@@ -62,7 +62,6 @@ function fakeAudio(options: FakeAudioOptions = {}) {
   const port: WalkModeAudioPort = {
     configureSession: record("configureSession"),
     speak: record("speak"),
-    enqueue: record("enqueue"),
     pause: record("pause"),
     resume: record("resume"),
     announce: record("announce"),
@@ -348,13 +347,21 @@ describe("WalkModeSession: replies", () => {
     expect(session.status).toBe("speaking");
   });
 
-  it("queues a reply that completes while another is being read", async () => {
+  it("reads only the newest reply that completes while another is being read, after it", async () => {
     const { session, audio, turns } = await startSession(thread([latest]));
     audio.press(1);
     audio.take();
     turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
-    expect(audio.take()).toEqual([["enqueue", ["Second reply."]]]);
+    turns.set(
+      thread([
+        latest,
+        turn("run-3", 3, "completed", "Second reply."),
+        turn("run-4", 4, "completed", "Third reply."),
+      ]),
+    );
+    expect(audio.take()).toEqual([]);
     audio.finishChunks(2);
+    expect(audio.take()).toEqual([["speak", ["Third reply."]]]);
     expect(session.status).toBe("speaking");
     audio.finishChunks(1);
     expect(session.status).toBe("idle");

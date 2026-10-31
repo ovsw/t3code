@@ -31,8 +31,6 @@ export interface WalkModeAudioPort {
   configureSession(): Promise<void>;
   /** Replaces whatever is queued with these chunks and starts speaking. */
   speak(chunks: readonly string[]): Promise<void>;
-  /** Queues chunks after the ones already loaded, keeping the pause state. */
-  enqueue(chunks: readonly string[]): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   /** Speaks one sentence beside the reply queue, which keeps its place and pause state. */
@@ -143,7 +141,7 @@ export class WalkModeSession {
   private readonly seenRuns = new Set<string>();
   private baselineTaken = false;
   private title: string | null = null;
-  /** Chunks of replies not yet handed to the audio port. */
+  /** The newest unread reply, not yet handed to the audio port. */
   private pendingChunks: string[] = [];
   /** The newest reply, read again by one press once speech has finished. */
   private latestReplyChunks: readonly string[] = [];
@@ -269,10 +267,10 @@ export class WalkModeSession {
       if (reply === null) continue;
       this.seenRuns.add(run.id);
       this.latestReplyChunks = reply.chunks;
-      // The voice finishes what it reads before the new reply. Once paused, the rest of the
-      // old reply is stale: the walker moved on, so the new reply takes its place.
-      if (this.state.kind === "speaking") this.queueChunks(reply.chunks);
-      else this.replaceChunks(reply.chunks);
+      // Only the newest unread reply is kept. The voice finishes what it reads first; once
+      // paused, the rest of the old reply is stale: the walker moved on.
+      this.pendingChunks = [...reply.chunks];
+      if (this.state.kind !== "speaking") this.loadedChunks = 0;
       // Without headphones the reply waits as paused instead of playing through the speaker.
       this.dispatch(
         this.headphones
@@ -303,21 +301,6 @@ export class WalkModeSession {
     ignoreFailure(this.input.audio.announce(sentence));
   }
 
-  private queueChunks(chunks: readonly string[]): void {
-    if (this.loadedChunks === 0) {
-      this.pendingChunks.push(...chunks);
-      return;
-    }
-    this.loadedChunks += chunks.length;
-    ignoreFailure(this.input.audio.enqueue(chunks));
-  }
-
-  /** Paused chunks stay in the audio port until the next speak replaces them. */
-  private replaceChunks(chunks: readonly string[]): void {
-    this.pendingChunks = [...chunks];
-    this.loadedChunks = 0;
-  }
-
   private speakPending(): void {
     const chunks = this.pendingChunks;
     this.pendingChunks = [];
@@ -338,7 +321,10 @@ export class WalkModeSession {
       case "chunk-finished":
         if (this.loadedChunks === 0) return;
         this.loadedChunks -= 1;
-        if (this.loadedChunks === 0) this.dispatch({ type: "speech.finished" });
+        if (this.loadedChunks > 0) return;
+        // A reply that arrived during this one follows it without a press.
+        if (this.state.kind === "speaking" && this.pendingChunks.length > 0) this.speakPending();
+        else this.dispatch({ type: "speech.finished" });
         return;
       case "route": {
         const lost = this.headphones && !event.headphones;

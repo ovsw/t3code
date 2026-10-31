@@ -36,7 +36,6 @@ function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
   return {
     configureSession: () => audio.configureSession(),
     speak: (chunks) => audio.speak(chunks),
-    enqueue: (chunks) => audio.enqueue(chunks),
     pause: () => audio.pause(),
     resume: () => audio.resume(),
     announce: (text) => audio.announce(text),

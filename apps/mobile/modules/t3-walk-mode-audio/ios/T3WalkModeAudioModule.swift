@@ -73,11 +73,6 @@ public class T3WalkModeAudioModule: Module {
       self.updateNowPlaying(rate: 1)
     }
 
-    // Appends after what is loaded; a paused synthesizer stays paused.
-    AsyncFunction("enqueue") { (chunks: [String]) in
-      self.queueUtterances(chunks)
-    }
-
     AsyncFunction("setNowPlayingTitle") { (title: String) in
       self.nowPlayingTitle = title
       self.updateNowPlaying(rate: self.nowPlayingRate)
@@ -285,9 +280,10 @@ public class T3WalkModeAudioModule: Module {
     let delegate = CallDelegate(
       onAudioActivated: { [weak self] in self?.callAudioActivated() },
       onAudioDeactivated: { [weak self] in self?.callAudioDeactivated() },
-      onCallAction: { [weak self] action in
+      onCallAction: { [weak self] action, callId in
         // The system ending the call (a stem press) means no call is left for us to end.
-        if action == "end" { self?.activeCallId = nil }
+        // A newer call keeps its id when the end action of an older one arrives late.
+        if action == "end", self?.activeCallId == callId { self?.activeCallId = nil }
         self?.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
       })
     provider.setDelegate(delegate, queue: nil)
@@ -480,12 +476,12 @@ private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
 private final class CallDelegate: NSObject, CXProviderDelegate {
   private let onAudioActivated: () -> Void
   private let onAudioDeactivated: () -> Void
-  private let onCallAction: (String) -> Void
+  private let onCallAction: (String, UUID) -> Void
 
   init(
     onAudioActivated: @escaping () -> Void,
     onAudioDeactivated: @escaping () -> Void,
-    onCallAction: @escaping (String) -> Void
+    onCallAction: @escaping (String, UUID) -> Void
   ) {
     self.onAudioActivated = onAudioActivated
     self.onAudioDeactivated = onAudioDeactivated
@@ -499,17 +495,17 @@ private final class CallDelegate: NSObject, CXProviderDelegate {
   }
 
   func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-    onCallAction("end")
+    onCallAction("end", action.callUUID)
     action.fulfill()
   }
 
   func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
-    onCallAction(action.isMuted ? "mute" : "unmute")
+    onCallAction(action.isMuted ? "mute" : "unmute", action.callUUID)
     action.fulfill()
   }
 
   func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
-    onCallAction(action.isOnHold ? "hold" : "unhold")
+    onCallAction(action.isOnHold ? "hold" : "unhold", action.callUUID)
     action.fulfill()
   }
 
