@@ -255,7 +255,10 @@ export class WalkModeSession {
       if (reply === null) continue;
       this.seenRuns.add(run.id);
       this.latestReplyChunks = reply.chunks;
-      this.queueChunks(reply.chunks);
+      // The voice finishes what it reads before the new reply. Once paused, the rest of the
+      // old reply is stale: the walker moved on, so the new reply takes its place.
+      if (this.state.kind === "speaking") this.queueChunks(reply.chunks);
+      else this.replaceChunks(reply.chunks);
       // Without headphones the reply waits as paused instead of playing through the speaker.
       this.dispatch({ type: this.headphones ? "reply.arrived" : "reply.loaded" });
     }
@@ -286,6 +289,12 @@ export class WalkModeSession {
     }
     this.loadedChunks += chunks.length;
     ignoreFailure(this.input.audio.enqueue(chunks));
+  }
+
+  /** Paused chunks stay in the audio port until the next speak replaces them. */
+  private replaceChunks(chunks: readonly string[]): void {
+    this.pendingChunks = [...chunks];
+    this.loadedChunks = 0;
   }
 
   private speakPending(): void {

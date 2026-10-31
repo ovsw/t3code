@@ -349,16 +349,26 @@ describe("WalkModeSession: replies", () => {
     expect(session.status).toBe("idle");
   });
 
-  it("keeps a reply that completes while paused waiting until the next press", async () => {
+  it("a reply that completes while paused replaces the unread rest and waits for one press", async () => {
     const { session, audio, turns } = await startSession(thread([latest]));
+    audio.press(1);
+    audio.press(1);
     audio.take();
     turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
     expect(audio.take()).toEqual([]);
     expect(session.status).toBe("paused");
     audio.press(1);
-    expect(audio.take()).toEqual([
-      ["speak", ["The login works now.", "Try it again.", "Second reply."]],
-    ]);
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
+    audio.finishChunks(1);
+    expect(session.status).toBe("idle");
+  });
+
+  it("a reply that completes before the loaded one was played replaces it", async () => {
+    const { audio, turns } = await startSession(thread([latest]));
+    audio.take();
+    turns.set(thread([latest, turn("run-3", 3, "completed", "Second reply.")]));
+    audio.press(1);
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
   });
 
   it("speaks a new reply at once after the previous one finished", async () => {
@@ -509,11 +519,12 @@ describe("WalkModeSession: recording", () => {
     expect(audio.take()).toEqual([
       ["startRecording", true],
       ["playSound", "tick"],
-      ["enqueue", ["Second reply."]],
       ["playSound", "tick"],
       ["stopRecording"],
       ["playSound", "saved"],
     ]);
+    audio.press(1);
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
   });
 
   it("stops by itself after five minutes, like a manual stop", async () => {
@@ -804,11 +815,11 @@ describe("WalkModeSession: headphones", () => {
     audio.press(1);
     audio.press(3);
     expect(session.status).toBe("paused");
-    expect(audio.take()).toEqual([["enqueue", ["Second reply."]]]);
+    expect(audio.take()).toEqual([]);
     audio.headphones(true);
     audio.press(1);
     expect(session.status).toBe("speaking");
-    expect(audio.take()).toEqual([["resume"]]);
+    expect(audio.take()).toEqual([["speak", ["Second reply."]]]);
   });
 
   it("a reply that completes without them waits as paused", async () => {
