@@ -1,0 +1,7 @@
+{
+  "platforms": ["apple"],
+  "apple": {
+    "modules": ["T3WalkModeAudioModule"],
+    "podspecPath": "T3WalkModeAudioNative.podspec"
+  }
+}

@@ -118,6 +118,7 @@ import {
 import { SettingsKeyboardRouteScreen } from "./features/settings/SettingsKeyboardRouteScreen";
 import { SettingsLegalRouteScreen } from "./features/settings/SettingsLegalRouteScreen";
 import { SettingsMicrophoneRouteScreen } from "./features/settings/SettingsMicrophoneRouteScreen";
+import { SettingsWalkModeRouteScreen } from "./features/settings/SettingsWalkModeRouteScreen";
 import {
   SettingsOpenSourceLicenseRouteScreen,
   SettingsOpenSourceLicensesRouteScreen,
@@ -371,6 +372,14 @@ const SETTINGS_SCREENS = {
     options: {
       ...SETTINGS_PAGE_OPTIONS,
       title: "Microphone",
+    },
+  }),
+  SettingsWalkMode: createNativeStackScreen({
+    screen: SettingsWalkModeRouteScreen,
+    linking: "settings/walk-mode",
+    options: {
+      ...SETTINGS_PAGE_OPTIONS,
+      title: "Walk mode",
     },
   }),
   SettingsFollowUp: createNativeStackScreen({

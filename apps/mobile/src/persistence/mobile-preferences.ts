@@ -112,6 +112,9 @@ export interface Preferences {
   readonly composerEnterBehavior?: ComposerEnterBehavior;
   readonly followUpBehavior?: FollowUpBehavior;
   readonly microphones?: ReadonlyArray<MicrophoneEntry>;
+  /** Walk mode: unset means on. */
+  readonly walkModeReadNewRepliesWhilePaused?: boolean;
+  readonly walkModeThinkingTone?: boolean;
   readonly projectGroupingEnabled?: boolean;
   readonly projectGroupingMode?: SidebarProjectGroupingMode;
   readonly planModeEnabled?: boolean;
@@ -192,6 +195,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     composerEnterBehavior?: ComposerEnterBehavior;
     followUpBehavior?: FollowUpBehavior;
     microphones?: ReadonlyArray<MicrophoneEntry>;
+    walkModeReadNewRepliesWhilePaused?: boolean;
+    walkModeThinkingTone?: boolean;
     projectGroupingEnabled?: boolean;
     projectGroupingMode?: SidebarProjectGroupingMode;
     planModeEnabled?: boolean;
@@ -298,6 +303,12 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (parsed.followUpBehavior === "queue" || parsed.followUpBehavior === "steer") {
     preferences.followUpBehavior = parsed.followUpBehavior;
+  }
+  if (typeof parsed.walkModeReadNewRepliesWhilePaused === "boolean") {
+    preferences.walkModeReadNewRepliesWhilePaused = parsed.walkModeReadNewRepliesWhilePaused;
+  }
+  if (typeof parsed.walkModeThinkingTone === "boolean") {
+    preferences.walkModeThinkingTone = parsed.walkModeThinkingTone;
   }
   if (Array.isArray(parsed.microphones)) {
     preferences.microphones = parsed.microphones.flatMap((entry): MicrophoneEntry[] => {

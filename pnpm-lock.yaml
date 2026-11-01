@@ -590,6 +590,9 @@ importers:
       '@t3tools/mobile-terminal-native':
         specifier: file:./modules/t3-terminal
         version: file:apps/mobile/modules/t3-terminal
+      '@t3tools/mobile-walk-mode-audio-native':
+        specifier: file:./modules/t3-walk-mode-audio
+        version: file:apps/mobile/modules/t3-walk-mode-audio
       '@t3tools/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -6392,6 +6395,9 @@ packages:
 
   '@t3tools/mobile-terminal-native@file:apps/mobile/modules/t3-terminal':
     resolution: {directory: apps/mobile/modules/t3-terminal, type: directory}
+
+  '@t3tools/mobile-walk-mode-audio-native@file:apps/mobile/modules/t3-walk-mode-audio':
+    resolution: {directory: apps/mobile/modules/t3-walk-mode-audio, type: directory}
 
   '@tabler/icons-react-native@3.44.0':
     resolution: {integrity: sha512-/Ppp68bpl9vQQsI/c+YiDC9dnLq4JUo0YI5qP72OQMC1WmCaRzdYn3CU79q01M2L3MfXO9a8WctWN8ay1Odkow==}
@@ -15907,6 +15913,8 @@ snapshots:
       react-native: 0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@react-native/metro-config@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(bufferutil@4.1.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(supports-color@8.1.1)(utf-8-validate@6.0.6)
 
   '@t3tools/mobile-terminal-native@file:apps/mobile/modules/t3-terminal': {}
+
+  '@t3tools/mobile-walk-mode-audio-native@file:apps/mobile/modules/t3-walk-mode-audio': {}
 
   '@tabler/icons-react-native@3.44.0(react-native-svg@15.16.0(react-native@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(@react-native/metro-config@0.88.0(@babel/core@7.29.7(supports-color@8.1.1))(bufferutil@4.1.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(supports-color@8.1.1)(utf-8-validate@6.0.6))(react@19.3.0))(react@19.3.0)':
     dependencies:
