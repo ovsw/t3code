@@ -680,7 +680,7 @@ describe("WalkModeSession: sending", () => {
     audio.press(3);
     await audio.until("playSound", "sent");
     expect(sent).toEqual([withWalkModePrefix("Ship it.\n\nThen tell me.")]);
-    expect(sent[0]).toMatch(/^\[Walk mode: I dictated this by voice/);
+    expect(sent[0]).toBe("[Walk mode]\n\nShip it.\n\nThen tell me.");
     expect(draft.text).toBe("");
     expect(session.status).toBe("paused");
     expect(audio.take()).toEqual([["playSound", "sent"]]);

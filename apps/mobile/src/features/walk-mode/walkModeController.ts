@@ -152,6 +152,10 @@ type ActiveWalkMode = {
 };
 
 let active: ActiveWalkMode | null = null;
+/** Walk mode is on for the app, not for one thread: it stays on until stopped. */
+let enabled = false;
+/** The thread on screen, where Walk mode runs while it is on. */
+let openThread: ScopedThreadRef | null = null;
 const listeners = new Set<() => void>();
 
 function notify(): void {
@@ -161,18 +165,51 @@ function notify(): void {
 export const walkModeAvailable = walkModeAudio !== null;
 
 export function stopWalkMode(): void {
+  enabled = false;
+  endSession();
+  notify();
+}
+
+/** Turns Walk mode on for the open thread. It then moves to each thread that opens. */
+export function startWalkMode(ref: ScopedThreadRef | null = openThread): Promise<void> {
+  enabled = true;
+  openThread = ref;
+  notify();
+  return ref === null ? Promise.resolve() : startSession(ref);
+}
+
+/** Called when a thread screen gains focus. */
+export function openWalkModeThread(ref: ScopedThreadRef): Promise<void> {
+  openThread = ref;
+  if (!enabled || active?.threadKey === scopedThreadKey(ref.environmentId, ref.threadId)) {
+    return Promise.resolve();
+  }
+  return startSession(ref);
+}
+
+/** A running session stays on the closed thread until another thread opens. */
+export function closeWalkModeThread(ref: ScopedThreadRef): void {
+  if (
+    openThread !== null &&
+    scopedThreadKey(openThread.environmentId, openThread.threadId) ===
+      scopedThreadKey(ref.environmentId, ref.threadId)
+  ) {
+    openThread = null;
+  }
+}
+
+function endSession(): void {
   if (active === null) return;
   const { session, unsubscribe } = active;
   active = null;
   unsubscribe();
   session.stop();
-  notify();
 }
 
 /** One session at a time: starting on another thread stops the current one. */
-export async function startWalkMode(ref: ScopedThreadRef): Promise<void> {
+async function startSession(ref: ScopedThreadRef): Promise<void> {
   if (walkModeAudio === null) return;
-  stopWalkMode();
+  endSession();
   const draftKey = scopedThreadKey(ref.environmentId, ref.threadId);
   const session = new WalkModeSession({
     turns: threadTurnStream(ref),
@@ -215,6 +252,10 @@ export function walkModeMessageText(threadKey: string, text: string): string {
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+export function useWalkModeEnabled(): boolean {
+  return useSyncExternalStore(subscribe, () => enabled);
 }
 
 /** The Walk mode state on this thread, or null when Walk mode is off here. */

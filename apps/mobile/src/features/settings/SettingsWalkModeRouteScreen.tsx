@@ -7,6 +7,13 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppText as Text } from "../../components/ui/AppText";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
+import { alertWalkModeStartFailure } from "../walk-mode/WalkModeBar";
+import {
+  startWalkMode,
+  stopWalkMode,
+  useWalkModeEnabled,
+  walkModeAvailable,
+} from "../walk-mode/walkModeController";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
@@ -21,6 +28,7 @@ export function SettingsWalkModeRouteScreen() {
     preferences.walkModeReadNewRepliesWhilePaused ??
     DEFAULT_WALK_MODE_SETTINGS.readNewRepliesWhilePaused;
   const thinkingTone = preferences.walkModeThinkingTone ?? DEFAULT_WALK_MODE_SETTINGS.thinkingTone;
+  const walkModeOn = useWalkModeEnabled();
 
   const content = (
     <ScrollView
@@ -30,6 +38,19 @@ export function SettingsWalkModeRouteScreen() {
       contentContainerClassName="gap-3 px-5 pt-4"
       contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
     >
+      <SettingsSection>
+        <SettingsSwitchRow
+          icon="headphones"
+          label="Walk mode"
+          subtitle="Stays on for the thread you have open, and moves to each thread you open."
+          disabled={!walkModeAvailable}
+          value={walkModeOn}
+          onValueChange={(value) => {
+            if (value) startWalkMode().catch(alertWalkModeStartFailure);
+            else stopWalkMode();
+          }}
+        />
+      </SettingsSection>
       <SettingsSection title="Replies">
         <SettingsSwitchRow
           icon="text.bubble"
@@ -50,7 +71,7 @@ export function SettingsWalkModeRouteScreen() {
       </SettingsSection>
       <Text className="px-2 text-sm text-foreground-muted">
         Walk mode reads replies in your headphones and records your answers by headphone presses.
-        Start it from the bar above the composer in a thread.
+        Turn it on here or from the bar above the composer in a thread.
       </Text>
     </ScrollView>
   );
