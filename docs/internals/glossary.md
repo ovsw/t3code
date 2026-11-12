@@ -72,4 +72,6 @@ See [composer context references](./composer-context-references.md) for the cont
 | Reply         | The agent's final text of one completed turn, as spoken. Code blocks, tool activity, and diffs are not part of it.                              |
 | Draft         | The thread's ordinary composer draft. Each transcribed recording is appended to it; a send sends it as one user message.                        |
 | Keep-alive    | A silent audio track that plays during Walk mode so iOS keeps routing headphone presses to the app while speech is paused.                      |
-| Thinking tone | A low repeating sound played while the agent's turn runs and no reply is ready.                                                                 |
+| Thinking tone | A low repeating sound played while the agent's turn runs and no reply is ready. It is the one repeating cue.                                    |
+| Cue           | A short sound that confirms a press or a Walk mode change: press heard, mic live, recording stopped, saved, sent, or error.                     |
+| Voice         | The speech voice Walk mode reads replies and spoken errors with, chosen per phone, with its speaking speed.                                     |
