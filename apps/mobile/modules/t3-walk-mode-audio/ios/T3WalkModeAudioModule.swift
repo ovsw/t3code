@@ -219,7 +219,7 @@ public class T3WalkModeAudioModule: Module {
 
   // The press cue plays here, before the press reaches JS, so it is heard at once.
   private func pressed(_ presses: Int) {
-    playPressCue()
+    playCue("press")
     sendEvent("gesture", ["presses": presses])
   }
 
@@ -294,7 +294,7 @@ public class T3WalkModeAudioModule: Module {
         // A newer call keeps its id when the end action of an older one arrives late.
         if action == "end", self.activeCallId == callId { self.activeCallId = nil }
         // CallKit calls back on its own queue; the cue players belong to the main queue.
-        if stemPress { DispatchQueue.main.async { [weak self] in self?.playPressCue() } }
+        if stemPress { DispatchQueue.main.async { [weak self] in self?.playCue("press") } }
         self.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
       })
     provider.setDelegate(delegate, queue: nil)
@@ -417,16 +417,16 @@ public class T3WalkModeAudioModule: Module {
     }
   }
 
-  // A cue that is missing plays nothing.
+  // A cue that is missing plays nothing. The route is checked here too: headphones can drop
+  // after JS decided to play, and lock-screen presses come without them.
   private func playCue(_ name: String) {
-    guard let player = soundPlayers[name] else { return }
+    guard hasHeadphones(), let player = soundPlayers[name] else { return }
     player.currentTime = 0
     player.play()
   }
 
-  // Lock-screen presses come without headphones and would sound through the speaker.
-  private func playPressCue() {
-    if hasHeadphones() { playCue("press") }
+  private func stopCues() {
+    for player in soundPlayers.values where player.isPlaying { player.stop() }
   }
 
   private func isForeground() -> Bool {
@@ -453,6 +453,7 @@ public class T3WalkModeAudioModule: Module {
       // Pause here, before the session hears of it, so no word reaches the speaker.
       synthesizer.pauseSpeaking(at: .immediate)
       noticeSynthesizer.stopSpeaking(at: .immediate)
+      stopCues()
       updateNowPlaying(rate: 0)
     }
     emitRoute()
