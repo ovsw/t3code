@@ -37,15 +37,18 @@ import {
 } from "../../state/use-composer-drafts";
 import { resolveWalkModeVoice, walkModeSpeed } from "./walkModeVoice";
 
-/** Refreshed when a session starts, so speaking never waits on the native voice list. */
+/** Refreshed on session start and by Settings, so speaking never waits on the native voice list. */
 let installedVoices: WalkModeInstalledVoices | null = null;
 
-function refreshInstalledVoices(audio: WalkModeAudio): void {
-  audio.listVoices().then(
+/** Reads the native voice list and shares it with playback, so a voice picked mid-session applies. */
+export function loadWalkModeVoices(): Promise<WalkModeInstalledVoices | null> {
+  if (walkModeAudio === null) return Promise.resolve(null);
+  return walkModeAudio.listVoices().then(
     (voices) => {
       installedVoices = voices;
+      return voices;
     },
-    () => {},
+    () => null,
   );
 }
 
@@ -237,7 +240,7 @@ function endSession(): void {
 async function startSession(ref: ScopedThreadRef): Promise<void> {
   if (walkModeAudio === null) return;
   endSession();
-  refreshInstalledVoices(walkModeAudio);
+  void loadWalkModeVoices();
   const draftKey = scopedThreadKey(ref.environmentId, ref.threadId);
   const session = new WalkModeSession({
     turns: threadTurnStream(ref),

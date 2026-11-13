@@ -17,6 +17,7 @@ import type { WalkModeInstalledVoices, WalkModeVoice } from "../../native/walkMo
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { alertWalkModeStartFailure } from "../walk-mode/WalkModeBar";
 import {
+  loadWalkModeVoices,
   startWalkMode,
   stopWalkMode,
   useWalkModeEnabled,
@@ -87,16 +88,12 @@ function useInstalledVoices(): WalkModeInstalledVoices | null {
   const [voices, setVoices] = useState<WalkModeInstalledVoices | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the native voice list, again on return from iOS Settings where voices are downloaded
   useEffect(() => {
-    const audio = walkModeAudio;
-    if (audio === null) return;
+    if (walkModeAudio === null) return;
     let active = true;
     const load = () =>
-      audio.listVoices().then(
-        (next) => {
-          if (active) setVoices(next);
-        },
-        () => {},
-      );
+      loadWalkModeVoices().then((next) => {
+        if (active && next !== null) setVoices(next);
+      });
     void load();
     const subscription = AppState.addEventListener("change", (state) => {
       if (state === "active") void load();
