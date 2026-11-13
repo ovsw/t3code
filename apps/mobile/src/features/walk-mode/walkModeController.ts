@@ -19,7 +19,11 @@ import { makeQueuedMessageMetadata } from "../../lib/commandMetadata";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
 import { walkModeAudio } from "../../native/walkModeAudio";
-import type { WalkModeAudio } from "../../native/walkModeAudio.types";
+import type {
+  WalkModeAudio,
+  WalkModeInstalledVoices,
+  WalkModeVoiceChoice,
+} from "../../native/walkModeAudio.types";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { mobilePreferencesAtom } from "../../state/preferences";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
@@ -31,14 +35,37 @@ import {
   rememberComposerDraftSelection,
   setComposerDraftText,
 } from "../../state/use-composer-drafts";
+import { resolveWalkModeVoice, walkModeSpeed } from "./walkModeVoice";
+
+/** Refreshed when a session starts, so speaking never waits on the native voice list. */
+let installedVoices: WalkModeInstalledVoices | null = null;
+
+function refreshInstalledVoices(audio: WalkModeAudio): void {
+  audio.listVoices().then(
+    (voices) => {
+      installedVoices = voices;
+    },
+    () => {},
+  );
+}
+
+/** Read on each use, so a voice or speed picked in Settings applies to the next reply. */
+function walkModeVoiceChoice(): WalkModeVoiceChoice {
+  const result = appAtomRegistry.get(mobilePreferencesAtom);
+  const preferences = AsyncResult.isSuccess(result) ? result.value : {};
+  return {
+    identifier: resolveWalkModeVoice(preferences.walkModeVoice ?? null, installedVoices),
+    speed: walkModeSpeed(preferences.walkModeSpeechSpeed),
+  };
+}
 
 function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
   return {
     configureSession: () => audio.configureSession(),
-    speak: (chunks) => audio.speak(chunks),
+    speak: (chunks) => audio.speak(chunks, walkModeVoiceChoice()),
     pause: () => audio.pause(),
     resume: () => audio.resume(),
-    announce: (text) => audio.announce(text),
+    announce: (text) => audio.announce(text, walkModeVoiceChoice()),
     setKeepAlive: (enabled) => audio.setKeepAlive(enabled),
     setNowPlayingTitle: (title) => audio.setNowPlayingTitle(title),
     hasWiredInput: () => audio.hasWiredInput(),
@@ -210,6 +237,7 @@ function endSession(): void {
 async function startSession(ref: ScopedThreadRef): Promise<void> {
   if (walkModeAudio === null) return;
   endSession();
+  refreshInstalledVoices(walkModeAudio);
   const draftKey = scopedThreadKey(ref.environmentId, ref.threadId);
   const session = new WalkModeSession({
     turns: threadTurnStream(ref),
