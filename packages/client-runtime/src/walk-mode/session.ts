@@ -16,7 +16,14 @@ import {
 
 export type WalkModeStatus = WalkModeState["kind"];
 
-export type WalkModeSound = "error" | "sent" | "saved" | "tick" | "thinking";
+/** The press cue is not here: native plays it inside the button handler, before JS hears the press. */
+export type WalkModeSound =
+  | "mic-live"
+  | "recording-stopped"
+  | "saved"
+  | "sent"
+  | "error"
+  | "thinking";
 
 export type WalkModeAudioEvent =
   | { readonly type: "gesture"; readonly presses: 1 | 2 | 3 }
@@ -392,7 +399,7 @@ export class WalkModeSession {
     started.then(
       () => {
         if (runId !== this.runId || !this.running || this.state.kind !== "recording") return;
-        this.playSound("tick");
+        this.playSound("mic-live");
         this.recordingLimit = setTimeout(() => {
           this.recordingLimit = null;
           if (this.state.kind === "recording") this.dispatch(PRESS_EVENTS[1]);
@@ -413,7 +420,7 @@ export class WalkModeSession {
     const runId = this.runId;
     const started = this.recordingStarted;
     this.recordingStarted = null;
-    this.playSound("tick");
+    this.playSound("recording-stopped");
     void this.transcribeRecording(started).then(
       (text) => {
         if (runId !== this.runId || !this.running) return;

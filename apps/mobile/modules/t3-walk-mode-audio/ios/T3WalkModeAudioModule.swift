@@ -1,5 +1,4 @@
 import AVFoundation
-import AudioToolbox
 import CallKit
 import ExpoModulesCore
 import MediaPlayer
@@ -11,6 +10,8 @@ public class T3WalkModeAudioModule: Module {
   private let synthesizer = AVSpeechSynthesizer()
   // Spoken errors; separate so the reply queue keeps its place and pause state.
   private let noticeSynthesizer = AVSpeechSynthesizer()
+  private let previewSynthesizer = AVSpeechSynthesizer()
+  private var previewDelegate: SpeechDelegate?
   private var configured = false
   private var speechDelegate: SpeechDelegate?
   private var remoteCommandsInstalled = false
@@ -44,6 +45,12 @@ public class T3WalkModeAudioModule: Module {
       })
       self.speechDelegate = delegate
       self.synthesizer.delegate = delegate
+      let previewDelegate = SpeechDelegate(onChunkFinished: { [weak self] in
+        guard let self, !self.configured, !self.previewSynthesizer.isSpeaking else { return }
+        self.releaseSession()
+      })
+      self.previewDelegate = previewDelegate
+      self.previewSynthesizer.delegate = previewDelegate
       let center = NotificationCenter.default
       // A category or route change stops AVAudioEngine; the keep-alive must come back by itself.
       center.addObserver(forName: .AVAudioEngineConfigurationChange, object: self.keepAliveEngine, queue: .main) { [weak self] _ in
@@ -61,15 +68,16 @@ public class T3WalkModeAudioModule: Module {
       try session.setCategory(.playback, mode: .spokenAudio, options: [])
       try session.setActive(true)
       self.configured = true
+      self.preloadCues()
       self.installRemoteCommands()
       self.updateNowPlaying(rate: 0)
       self.emitRoute()
     }.runOnQueue(.main)
 
-    AsyncFunction("speak") { (chunks: [String]) in
+    AsyncFunction("speak") { (chunks: [String], voice: VoiceChoice) in
       self.synthesizer.stopSpeaking(at: .immediate)
       self.pendingUtterances = 0
-      self.queueUtterances(chunks)
+      self.queueUtterances(chunks, voice: voice)
       self.updateNowPlaying(rate: 1)
     }
 
@@ -88,9 +96,34 @@ public class T3WalkModeAudioModule: Module {
       self.updateNowPlaying(rate: 1)
     }
 
-    AsyncFunction("announce") { (text: String) in
-      self.noticeSynthesizer.speak(AVSpeechUtterance(string: text))
+    AsyncFunction("announce") { (text: String, voice: VoiceChoice) in
+      self.noticeSynthesizer.speak(Self.utterance(text, voice: voice))
     }
+
+    AsyncFunction("listVoices") { () -> [String: Any] in
+      let voices = AVSpeechSynthesisVoice.speechVoices().map { voice -> [String: Any] in
+        let quality: String
+        switch voice.quality {
+        case .premium: quality = "premium"
+        case .enhanced: quality = "enhanced"
+        default: quality = "default"
+        }
+        return ["identifier": voice.identifier, "name": voice.name, "language": voice.language, "quality": quality]
+      }
+      return ["language": AVSpeechSynthesisVoice.currentLanguageCode(), "voices": voices]
+    }
+
+    // Settings can preview with Walk mode off: .playback keeps the ring/silent switch from muting
+    // it, and the session is released again when the sample ends.
+    AsyncFunction("previewVoice") { (text: String, voice: VoiceChoice) in
+      self.previewSynthesizer.stopSpeaking(at: .immediate)
+      if !self.configured {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        try? session.setActive(true)
+      }
+      self.previewSynthesizer.speak(Self.utterance(text, voice: voice))
+    }.runOnQueue(.main)
 
     // Walk mode off: everything ends at once and other apps get the audio and buttons back.
     AsyncFunction("shutdown") {
@@ -98,6 +131,7 @@ public class T3WalkModeAudioModule: Module {
       self.pendingUtterances = 0
       self.synthesizer.stopSpeaking(at: .immediate)
       self.noticeSynthesizer.stopSpeaking(at: .immediate)
+      self.previewSynthesizer.stopSpeaking(at: .immediate)
       self.recorder?.stop()
       self.recorder = nil
       if let pending = self.pendingCallRecordingPromise {
@@ -180,10 +214,10 @@ public class T3WalkModeAudioModule: Module {
       if enabled { try self.startKeepAlive() } else { self.stopKeepAlive() }
     }.runOnQueue(.main)
 
-    // Through the app's own session, not AudioServicesPlaySystemSound: system sounds obey the
-    // ring/silent switch while the app is in the foreground, so they went missing with the screen on.
+    // Through the app's own session, not system sounds: those obey the ring/silent switch
+    // while the app is in the foreground, so they went missing with the screen on.
     AsyncFunction("playSound") { (kind: String) in
-      self.playSound(kind)
+      self.playCue(kind)
     }.runOnQueue(.main)
   }
 
@@ -193,7 +227,7 @@ public class T3WalkModeAudioModule: Module {
     UIApplication.shared.beginReceivingRemoteControlEvents()
     let center = MPRemoteCommandCenter.shared()
     let single: (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self] _ in
-      self?.sendEvent("gesture", ["presses": 1])
+      self?.pressed(1)
       return .success
     }
     center.togglePlayPauseCommand.isEnabled = true
@@ -204,17 +238,23 @@ public class T3WalkModeAudioModule: Module {
     center.pauseCommand.addTarget(handler: single)
     center.nextTrackCommand.isEnabled = true
     center.nextTrackCommand.addTarget { [weak self] _ in
-      self?.sendEvent("gesture", ["presses": 2])
+      self?.pressed(2)
       return .success
     }
     center.previousTrackCommand.isEnabled = true
     center.previousTrackCommand.addTarget { [weak self] _ in
-      self?.sendEvent("gesture", ["presses": 3])
+      self?.pressed(3)
       return .success
     }
     for command in [center.seekForwardCommand, center.seekBackwardCommand, center.skipForwardCommand, center.skipBackwardCommand] {
       command.isEnabled = false
     }
+  }
+
+  // The press cue plays here, before the press reaches JS, so it is heard at once.
+  private func pressed(_ presses: Int) {
+    playCue("press")
+    sendEvent("gesture", ["presses": presses])
   }
 
   private func removeRemoteCommands() {
@@ -228,13 +268,24 @@ public class T3WalkModeAudioModule: Module {
     UIApplication.shared.endReceivingRemoteControlEvents()
   }
 
-  private func queueUtterances(_ chunks: [String]) {
+  private func queueUtterances(_ chunks: [String], voice: VoiceChoice) {
     pendingUtterances += chunks.count
     for chunk in chunks {
-      let utterance = AVSpeechUtterance(string: chunk)
+      let utterance = Self.utterance(chunk, voice: voice)
       utterance.postUtteranceDelay = 0.25
       synthesizer.speak(utterance)
     }
+  }
+
+  private static func utterance(_ text: String, voice: VoiceChoice) -> AVSpeechUtterance {
+    let utterance = AVSpeechUtterance(string: text)
+    // A voice deleted since it was picked resolves to nil, which leaves the iOS default.
+    if let identifier = voice.identifier {
+      utterance.voice = AVSpeechSynthesisVoice(identifier: identifier)
+    }
+    let rate = AVSpeechUtteranceDefaultSpeechRate * Float(voice.speed)
+    utterance.rate = min(AVSpeechUtteranceMaximumSpeechRate, max(AVSpeechUtteranceMinimumSpeechRate, rate))
+    return utterance
   }
 
   private func updateNowPlaying(rate: Double) {
@@ -281,10 +332,15 @@ public class T3WalkModeAudioModule: Module {
       onAudioActivated: { [weak self] in self?.callAudioActivated() },
       onAudioDeactivated: { [weak self] in self?.callAudioDeactivated() },
       onCallAction: { [weak self] action, callId in
+        guard let self else { return }
+        // Our own end request clears activeCallId first, so only a stem press counts as one.
+        let stemPress = action != "end" || self.activeCallId == callId
         // The system ending the call (a stem press) means no call is left for us to end.
         // A newer call keeps its id when the end action of an older one arrives late.
-        if action == "end", self?.activeCallId == callId { self?.activeCallId = nil }
-        self?.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
+        if action == "end", self.activeCallId == callId { self.activeCallId = nil }
+        // CallKit calls back on its own queue; the cue players belong to the main queue.
+        if stemPress { DispatchQueue.main.async { [weak self] in self?.playCue("press") } }
+        self.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
       })
     provider.setDelegate(delegate, queue: nil)
     callProvider = provider
@@ -383,29 +439,39 @@ public class T3WalkModeAudioModule: Module {
     .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .usbAudio,
   ]
 
-  private static let sounds: [String: (file: String, fallback: SystemSoundID)] = [
-    "error": ("ct-error", 1073),
-    "sent": ("mail-sent", 1001),
-    "saved": ("end_record", 1114),
-    "tick": ("Tink", 1057),
-    "thinking": ("Tink", 1057),
-  ]
+  // File names in ios/cues; the session's sound kinds are the same names, minus "press".
+  private static let cues = ["press", "mic-live", "recording-stopped", "saved", "sent", "error", "thinking"]
 
-  private func playSound(_ kind: String) {
-    let sound = Self.sounds[kind] ?? Self.sounds["tick"]!
-    if let player = soundPlayers[kind] {
-      player.currentTime = 0
-      player.play()
-      return
+  // The podspec's resource bundle: in the app bundle when linked statically, else in the framework.
+  private static let cueBundle: Bundle? = {
+    let owner = Bundle(for: T3WalkModeAudioModule.self)
+    return owner.url(forResource: "T3WalkModeAudioCues", withExtension: "bundle").flatMap(Bundle.init(url:))
+  }()
+
+  // Loaded once up front, so the first play of each cue is as quick as the rest.
+  private func preloadCues() {
+    guard let bundle = Self.cueBundle else { return }
+    for name in Self.cues where soundPlayers[name] == nil {
+      guard let url = bundle.url(forResource: name, withExtension: "wav"),
+        let player = try? AVAudioPlayer(contentsOf: url)
+      else { continue }
+      // The files share one peak level; full volume puts them level with speech.
+      player.volume = 1.0
+      player.prepareToPlay()
+      soundPlayers[name] = player
     }
-    let url = URL(fileURLWithPath: "/System/Library/Audio/UISounds/\(sound.file).caf")
-    guard let player = try? AVAudioPlayer(contentsOf: url) else {
-      AudioServicesPlaySystemSound(sound.fallback)
-      return
-    }
-    player.prepareToPlay()
-    soundPlayers[kind] = player
+  }
+
+  // A cue that is missing plays nothing. The route is checked here too: headphones can drop
+  // after JS decided to play, and lock-screen presses come without them.
+  private func playCue(_ name: String) {
+    guard hasHeadphones(), let player = soundPlayers[name] else { return }
+    player.currentTime = 0
     player.play()
+  }
+
+  private func stopCues() {
+    for player in soundPlayers.values where player.isPlaying { player.stop() }
   }
 
   private func isForeground() -> Bool {
@@ -432,6 +498,7 @@ public class T3WalkModeAudioModule: Module {
       // Pause here, before the session hears of it, so no word reaches the speaker.
       synthesizer.pauseSpeaking(at: .immediate)
       noticeSynthesizer.stopSpeaking(at: .immediate)
+      stopCues()
       updateNowPlaying(rate: 0)
     }
     emitRoute()
@@ -459,6 +526,11 @@ public class T3WalkModeAudioModule: Module {
     keepAliveEngine.stop()
     keepAliveRunning = false
   }
+}
+
+struct VoiceChoice: Record {
+  @Field var identifier: String? = nil
+  @Field var speed: Double = 1
 }
 
 private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
