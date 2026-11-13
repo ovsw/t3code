@@ -1,5 +1,4 @@
 import AVFoundation
-import AudioToolbox
 import CallKit
 import ExpoModulesCore
 import MediaPlayer
@@ -61,6 +60,7 @@ public class T3WalkModeAudioModule: Module {
       try session.setCategory(.playback, mode: .spokenAudio, options: [])
       try session.setActive(true)
       self.configured = true
+      self.preloadCues()
       self.installRemoteCommands()
       self.updateNowPlaying(rate: 0)
       self.emitRoute()
@@ -180,10 +180,10 @@ public class T3WalkModeAudioModule: Module {
       if enabled { try self.startKeepAlive() } else { self.stopKeepAlive() }
     }.runOnQueue(.main)
 
-    // Through the app's own session, not AudioServicesPlaySystemSound: system sounds obey the
-    // ring/silent switch while the app is in the foreground, so they went missing with the screen on.
+    // Through the app's own session, not system sounds: those obey the ring/silent switch
+    // while the app is in the foreground, so they went missing with the screen on.
     AsyncFunction("playSound") { (kind: String) in
-      self.playSound(kind)
+      self.playCue(kind)
     }.runOnQueue(.main)
   }
 
@@ -193,7 +193,7 @@ public class T3WalkModeAudioModule: Module {
     UIApplication.shared.beginReceivingRemoteControlEvents()
     let center = MPRemoteCommandCenter.shared()
     let single: (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self] _ in
-      self?.sendEvent("gesture", ["presses": 1])
+      self?.pressed(1)
       return .success
     }
     center.togglePlayPauseCommand.isEnabled = true
@@ -204,17 +204,23 @@ public class T3WalkModeAudioModule: Module {
     center.pauseCommand.addTarget(handler: single)
     center.nextTrackCommand.isEnabled = true
     center.nextTrackCommand.addTarget { [weak self] _ in
-      self?.sendEvent("gesture", ["presses": 2])
+      self?.pressed(2)
       return .success
     }
     center.previousTrackCommand.isEnabled = true
     center.previousTrackCommand.addTarget { [weak self] _ in
-      self?.sendEvent("gesture", ["presses": 3])
+      self?.pressed(3)
       return .success
     }
     for command in [center.seekForwardCommand, center.seekBackwardCommand, center.skipForwardCommand, center.skipBackwardCommand] {
       command.isEnabled = false
     }
+  }
+
+  // The press cue plays here, before the press reaches JS, so it is heard at once.
+  private func pressed(_ presses: Int) {
+    playPressCue()
+    sendEvent("gesture", ["presses": presses])
   }
 
   private func removeRemoteCommands() {
@@ -281,10 +287,15 @@ public class T3WalkModeAudioModule: Module {
       onAudioActivated: { [weak self] in self?.callAudioActivated() },
       onAudioDeactivated: { [weak self] in self?.callAudioDeactivated() },
       onCallAction: { [weak self] action, callId in
+        guard let self else { return }
+        // Our own end request clears activeCallId first, so only a stem press counts as one.
+        let stemPress = action != "end" || self.activeCallId == callId
         // The system ending the call (a stem press) means no call is left for us to end.
         // A newer call keeps its id when the end action of an older one arrives late.
-        if action == "end", self?.activeCallId == callId { self?.activeCallId = nil }
-        self?.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
+        if action == "end", self.activeCallId == callId { self.activeCallId = nil }
+        // CallKit calls back on its own queue; the cue players belong to the main queue.
+        if stemPress { DispatchQueue.main.async { [weak self] in self?.playPressCue() } }
+        self.sendEvent("gesture", ["presses": 1, "source": "call", "action": action])
       })
     provider.setDelegate(delegate, queue: nil)
     callProvider = provider
@@ -383,29 +394,39 @@ public class T3WalkModeAudioModule: Module {
     .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .usbAudio,
   ]
 
-  private static let sounds: [String: (file: String, fallback: SystemSoundID)] = [
-    "error": ("ct-error", 1073),
-    "sent": ("mail-sent", 1001),
-    "saved": ("end_record", 1114),
-    "tick": ("Tink", 1057),
-    "thinking": ("Tink", 1057),
-  ]
+  // File names in ios/cues; the session's sound kinds are the same names, minus "press".
+  private static let cues = ["press", "mic-live", "recording-stopped", "saved", "sent", "error", "thinking"]
 
-  private func playSound(_ kind: String) {
-    let sound = Self.sounds[kind] ?? Self.sounds["tick"]!
-    if let player = soundPlayers[kind] {
-      player.currentTime = 0
-      player.play()
-      return
+  // The podspec's resource bundle: in the app bundle when linked statically, else in the framework.
+  private static let cueBundle: Bundle? = {
+    let owner = Bundle(for: T3WalkModeAudioModule.self)
+    return owner.url(forResource: "T3WalkModeAudioCues", withExtension: "bundle").flatMap(Bundle.init(url:))
+  }()
+
+  // Loaded once up front, so the first play of each cue is as quick as the rest.
+  private func preloadCues() {
+    guard let bundle = Self.cueBundle else { return }
+    for name in Self.cues where soundPlayers[name] == nil {
+      guard let url = bundle.url(forResource: name, withExtension: "wav"),
+        let player = try? AVAudioPlayer(contentsOf: url)
+      else { continue }
+      // The files share one peak level; full volume puts them level with speech.
+      player.volume = 1.0
+      player.prepareToPlay()
+      soundPlayers[name] = player
     }
-    let url = URL(fileURLWithPath: "/System/Library/Audio/UISounds/\(sound.file).caf")
-    guard let player = try? AVAudioPlayer(contentsOf: url) else {
-      AudioServicesPlaySystemSound(sound.fallback)
-      return
-    }
-    player.prepareToPlay()
-    soundPlayers[kind] = player
+  }
+
+  // A cue that is missing plays nothing.
+  private func playCue(_ name: String) {
+    guard let player = soundPlayers[name] else { return }
+    player.currentTime = 0
     player.play()
+  }
+
+  // Lock-screen presses come without headphones and would sound through the speaker.
+  private func playPressCue() {
+    if hasHeadphones() { playCue("press") }
   }
 
   private func isForeground() -> Bool {
