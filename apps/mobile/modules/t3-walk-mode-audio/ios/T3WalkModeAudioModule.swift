@@ -10,6 +10,8 @@ public class T3WalkModeAudioModule: Module {
   private let synthesizer = AVSpeechSynthesizer()
   // Spoken errors; separate so the reply queue keeps its place and pause state.
   private let noticeSynthesizer = AVSpeechSynthesizer()
+  private let previewSynthesizer = AVSpeechSynthesizer()
+  private var previewDelegate: SpeechDelegate?
   private var configured = false
   private var speechDelegate: SpeechDelegate?
   private var remoteCommandsInstalled = false
@@ -43,6 +45,12 @@ public class T3WalkModeAudioModule: Module {
       })
       self.speechDelegate = delegate
       self.synthesizer.delegate = delegate
+      let previewDelegate = SpeechDelegate(onChunkFinished: { [weak self] in
+        guard let self, !self.configured, !self.previewSynthesizer.isSpeaking else { return }
+        self.releaseSession()
+      })
+      self.previewDelegate = previewDelegate
+      self.previewSynthesizer.delegate = previewDelegate
       let center = NotificationCenter.default
       // A category or route change stops AVAudioEngine; the keep-alive must come back by itself.
       center.addObserver(forName: .AVAudioEngineConfigurationChange, object: self.keepAliveEngine, queue: .main) { [weak self] _ in
@@ -66,10 +74,10 @@ public class T3WalkModeAudioModule: Module {
       self.emitRoute()
     }.runOnQueue(.main)
 
-    AsyncFunction("speak") { (chunks: [String]) in
+    AsyncFunction("speak") { (chunks: [String], voice: VoiceChoice) in
       self.synthesizer.stopSpeaking(at: .immediate)
       self.pendingUtterances = 0
-      self.queueUtterances(chunks)
+      self.queueUtterances(chunks, voice: voice)
       self.updateNowPlaying(rate: 1)
     }
 
@@ -88,9 +96,34 @@ public class T3WalkModeAudioModule: Module {
       self.updateNowPlaying(rate: 1)
     }
 
-    AsyncFunction("announce") { (text: String) in
-      self.noticeSynthesizer.speak(AVSpeechUtterance(string: text))
+    AsyncFunction("announce") { (text: String, voice: VoiceChoice) in
+      self.noticeSynthesizer.speak(Self.utterance(text, voice: voice))
     }
+
+    AsyncFunction("listVoices") { () -> [String: Any] in
+      let voices = AVSpeechSynthesisVoice.speechVoices().map { voice -> [String: Any] in
+        let quality: String
+        switch voice.quality {
+        case .premium: quality = "premium"
+        case .enhanced: quality = "enhanced"
+        default: quality = "default"
+        }
+        return ["identifier": voice.identifier, "name": voice.name, "language": voice.language, "quality": quality]
+      }
+      return ["language": AVSpeechSynthesisVoice.currentLanguageCode(), "voices": voices]
+    }
+
+    // Settings can preview with Walk mode off: .playback keeps the ring/silent switch from muting
+    // it, and the session is released again when the sample ends.
+    AsyncFunction("previewVoice") { (text: String, voice: VoiceChoice) in
+      self.previewSynthesizer.stopSpeaking(at: .immediate)
+      if !self.configured {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        try? session.setActive(true)
+      }
+      self.previewSynthesizer.speak(Self.utterance(text, voice: voice))
+    }.runOnQueue(.main)
 
     // Walk mode off: everything ends at once and other apps get the audio and buttons back.
     AsyncFunction("shutdown") {
@@ -98,6 +131,7 @@ public class T3WalkModeAudioModule: Module {
       self.pendingUtterances = 0
       self.synthesizer.stopSpeaking(at: .immediate)
       self.noticeSynthesizer.stopSpeaking(at: .immediate)
+      self.previewSynthesizer.stopSpeaking(at: .immediate)
       self.recorder?.stop()
       self.recorder = nil
       if let pending = self.pendingCallRecordingPromise {
@@ -234,13 +268,24 @@ public class T3WalkModeAudioModule: Module {
     UIApplication.shared.endReceivingRemoteControlEvents()
   }
 
-  private func queueUtterances(_ chunks: [String]) {
+  private func queueUtterances(_ chunks: [String], voice: VoiceChoice) {
     pendingUtterances += chunks.count
     for chunk in chunks {
-      let utterance = AVSpeechUtterance(string: chunk)
+      let utterance = Self.utterance(chunk, voice: voice)
       utterance.postUtteranceDelay = 0.25
       synthesizer.speak(utterance)
     }
+  }
+
+  private static func utterance(_ text: String, voice: VoiceChoice) -> AVSpeechUtterance {
+    let utterance = AVSpeechUtterance(string: text)
+    // A voice deleted since it was picked resolves to nil, which leaves the iOS default.
+    if let identifier = voice.identifier {
+      utterance.voice = AVSpeechSynthesisVoice(identifier: identifier)
+    }
+    let rate = AVSpeechUtteranceDefaultSpeechRate * Float(voice.speed)
+    utterance.rate = min(AVSpeechUtteranceMaximumSpeechRate, max(AVSpeechUtteranceMinimumSpeechRate, rate))
+    return utterance
   }
 
   private func updateNowPlaying(rate: Double) {
@@ -481,6 +526,11 @@ public class T3WalkModeAudioModule: Module {
     keepAliveEngine.stop()
     keepAliveRunning = false
   }
+}
+
+struct VoiceChoice: Record {
+  @Field var identifier: String? = nil
+  @Field var speed: Double = 1
 }
 
 private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {

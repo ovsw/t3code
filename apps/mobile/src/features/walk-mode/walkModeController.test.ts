@@ -8,6 +8,7 @@ const audio = vi.hoisted(() => ({
   setKeepAlive: vi.fn(async () => {}),
   setNowPlayingTitle: vi.fn(async () => {}),
   shutdown: vi.fn(async () => {}),
+  listVoices: vi.fn(async () => ({ language: "en-US", voices: [] })),
   addListener: () => ({ remove: () => {} }),
 }));
 vi.mock("../../native/walkModeAudio", () => ({ walkModeAudio: audio }));

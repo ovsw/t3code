@@ -30,7 +30,15 @@ const SETTINGS_SEARCH_TERMS = {
   SettingsNavigation: ["tabs", "tab order", "reorder", "hide tabs"],
   SettingsKeyboard: ["return key", "send message", "new line", "hardware keyboard"],
   SettingsMicrophone: ["voice", "dictation", "audio input", "bluetooth"],
-  SettingsWalkMode: ["walk mode", "headphones", "read aloud", "speech", "thinking tone"],
+  SettingsWalkMode: [
+    "walk mode",
+    "headphones",
+    "read aloud",
+    "speech",
+    "thinking tone",
+    "voice",
+    "speed",
+  ],
   SettingsScheduledTasks: ["automations", "schedule", "cron", "recurring", "webhook"],
   SettingsProjectOverview: ["project", "overview", "checkouts", "delete project"],
   SettingsOrganization: [
