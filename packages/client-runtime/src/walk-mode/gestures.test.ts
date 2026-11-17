@@ -148,6 +148,46 @@ describe("walk mode: sending", () => {
   });
 });
 
+describe("walk mode: media remote", () => {
+  const resting = [
+    initialWalkModeState,
+    { kind: "speaking", hasSpeech: true },
+    { kind: "paused", hasSpeech: true },
+  ] satisfies WalkModeState[];
+  const busy = [
+    { kind: "recording", hasSpeech: true, sendWhenDone: false },
+    { kind: "transcribing", hasSpeech: true, sendWhenDone: false },
+  ] satisfies WalkModeState[];
+
+  it("next twice sends the agreement without changing state, and waits out a recording", () => {
+    for (const start of resting) {
+      const { state, effectTypes } = run([{ type: "press.double.twice" }], start);
+      expect(state).toEqual(start);
+      expect(effectTypes).toEqual(["send.agreement"]);
+    }
+    for (const start of busy) {
+      expect(run([{ type: "press.double.twice" }], start)).toMatchObject({
+        state: start,
+        effectTypes: [],
+      });
+    }
+  });
+
+  it("previous twice reads back one sentence, and waits out a recording", () => {
+    for (const start of resting) {
+      const { state, effectTypes } = run([{ type: "press.triple.twice" }], start);
+      expect(state.kind).toBe("speaking");
+      expect(effectTypes).toEqual(["speech.back"]);
+    }
+    for (const start of busy) {
+      expect(run([{ type: "press.triple.twice" }], start)).toMatchObject({
+        state: start,
+        effectTypes: [],
+      });
+    }
+  });
+});
+
 describe("walk mode: headphones lost", () => {
   const lost: WalkModeEvent = { type: "headset.lost" };
 

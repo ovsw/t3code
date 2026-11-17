@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 
 import {
   DEFAULT_WALK_MODE_SETTINGS,
+  makeWalkModePressGrouper,
   WalkModeSession,
   walkModeTurnsFromProjection,
   withWalkModePrefix,
@@ -19,7 +20,11 @@ import { makeQueuedMessageMetadata } from "../../lib/commandMetadata";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
 import { walkModeAudio } from "../../native/walkModeAudio";
-import type { WalkModeAudio } from "../../native/walkModeAudio.types";
+import type {
+  WalkModeAudio,
+  WalkModeInstalledVoices,
+  WalkModeVoiceChoice,
+} from "../../native/walkModeAudio.types";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { mobilePreferencesAtom } from "../../state/preferences";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
@@ -31,14 +36,40 @@ import {
   rememberComposerDraftSelection,
   setComposerDraftText,
 } from "../../state/use-composer-drafts";
+import { resolveWalkModeVoice, walkModeSpeed } from "./walkModeVoice";
+
+/** Refreshed on session start and by Settings, so speaking never waits on the native voice list. */
+let installedVoices: WalkModeInstalledVoices | null = null;
+
+/** Reads the native voice list and shares it with playback, so a voice picked mid-session applies. */
+export function loadWalkModeVoices(): Promise<WalkModeInstalledVoices | null> {
+  if (walkModeAudio === null) return Promise.resolve(null);
+  return walkModeAudio.listVoices().then(
+    (voices) => {
+      installedVoices = voices;
+      return voices;
+    },
+    () => null,
+  );
+}
+
+/** Read on each use, so a voice or speed picked in Settings applies to the next reply. */
+function walkModeVoiceChoice(): WalkModeVoiceChoice {
+  const result = appAtomRegistry.get(mobilePreferencesAtom);
+  const preferences = AsyncResult.isSuccess(result) ? result.value : {};
+  return {
+    identifier: resolveWalkModeVoice(preferences.walkModeVoice ?? null, installedVoices),
+    speed: walkModeSpeed(preferences.walkModeSpeechSpeed),
+  };
+}
 
 function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
   return {
     configureSession: () => audio.configureSession(),
-    speak: (chunks) => audio.speak(chunks),
+    speak: (chunks) => audio.speak(chunks, walkModeVoiceChoice()),
     pause: () => audio.pause(),
     resume: () => audio.resume(),
-    announce: (text) => audio.announce(text),
+    announce: (text) => audio.announce(text, walkModeVoiceChoice()),
     setKeepAlive: (enabled) => audio.setKeepAlive(enabled),
     setNowPlayingTitle: (title) => audio.setNowPlayingTitle(title),
     hasWiredInput: () => audio.hasWiredInput(),
@@ -47,20 +78,25 @@ function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
     playSound: (kind) => audio.playSound(kind),
     shutdown: () => audio.shutdown(),
     subscribe: (listener) => {
-      const subscriptions = [
-        audio.addListener("gesture", (event) =>
-          listener(
-            event.source === "call"
-              ? { type: "call-action", action: event.action }
-              : { type: "gesture", presses: event.presses },
-          ),
+      const presses = makeWalkModePressGrouper((press) =>
+        listener(
+          press.twice
+            ? { type: "gesture-twice", presses: press.presses }
+            : { type: "gesture", presses: press.presses },
         ),
+      );
+      const subscriptions = [
+        audio.addListener("gesture", (event) => {
+          if (event.source === "call") listener({ type: "call-action", action: event.action });
+          else presses.press(event.presses);
+        }),
         audio.addListener("speech", () => listener({ type: "chunk-finished" })),
         audio.addListener("session", (event) =>
           listener({ type: "route", headphones: event.headphones }),
         ),
       ];
       return () => {
+        presses.dispose();
         for (const subscription of subscriptions) subscription.remove();
       };
     },
@@ -210,6 +246,7 @@ function endSession(): void {
 async function startSession(ref: ScopedThreadRef): Promise<void> {
   if (walkModeAudio === null) return;
   endSession();
+  void loadWalkModeVoices();
   const draftKey = scopedThreadKey(ref.environmentId, ref.threadId);
   const session = new WalkModeSession({
     turns: threadTurnStream(ref),

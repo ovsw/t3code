@@ -115,6 +115,9 @@ export interface Preferences {
   /** Walk mode: unset means on. */
   readonly walkModeReadNewRepliesWhilePaused?: boolean;
   readonly walkModeThinkingTone?: boolean;
+  /** Per phone, since installed voices differ. Unset or null means Automatic. */
+  readonly walkModeVoice?: string | null;
+  readonly walkModeSpeechSpeed?: number;
   readonly projectGroupingEnabled?: boolean;
   readonly projectGroupingMode?: SidebarProjectGroupingMode;
   readonly planModeEnabled?: boolean;
@@ -197,6 +200,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     microphones?: ReadonlyArray<MicrophoneEntry>;
     walkModeReadNewRepliesWhilePaused?: boolean;
     walkModeThinkingTone?: boolean;
+    walkModeVoice?: string | null;
+    walkModeSpeechSpeed?: number;
     projectGroupingEnabled?: boolean;
     projectGroupingMode?: SidebarProjectGroupingMode;
     planModeEnabled?: boolean;
@@ -309,6 +314,12 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.walkModeThinkingTone === "boolean") {
     preferences.walkModeThinkingTone = parsed.walkModeThinkingTone;
+  }
+  if (typeof parsed.walkModeVoice === "string" || parsed.walkModeVoice === null) {
+    preferences.walkModeVoice = parsed.walkModeVoice;
+  }
+  if (typeof parsed.walkModeSpeechSpeed === "number") {
+    preferences.walkModeSpeechSpeed = parsed.walkModeSpeechSpeed;
   }
   if (Array.isArray(parsed.microphones)) {
     preferences.microphones = parsed.microphones.flatMap((entry): MicrophoneEntry[] => {
