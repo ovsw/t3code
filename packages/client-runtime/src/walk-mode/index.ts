@@ -11,6 +11,7 @@ export {
   type WalkModeTurnItem,
   type WalkModeTurns,
 } from "./reply.ts";
+export { makeWalkModePressGrouper, type WalkModePress } from "./presses.ts";
 export {
   DEFAULT_WALK_MODE_SETTINGS,
   WalkModeSession,

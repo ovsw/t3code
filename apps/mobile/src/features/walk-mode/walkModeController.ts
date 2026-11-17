@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 
 import {
   DEFAULT_WALK_MODE_SETTINGS,
+  makeWalkModePressGrouper,
   WalkModeSession,
   walkModeTurnsFromProjection,
   withWalkModePrefix,
@@ -77,20 +78,25 @@ function nativeAudioPort(audio: WalkModeAudio): WalkModeAudioPort {
     playSound: (kind) => audio.playSound(kind),
     shutdown: () => audio.shutdown(),
     subscribe: (listener) => {
-      const subscriptions = [
-        audio.addListener("gesture", (event) =>
-          listener(
-            event.source === "call"
-              ? { type: "call-action", action: event.action }
-              : { type: "gesture", presses: event.presses },
-          ),
+      const presses = makeWalkModePressGrouper((press) =>
+        listener(
+          press.twice
+            ? { type: "gesture-twice", presses: press.presses }
+            : { type: "gesture", presses: press.presses },
         ),
+      );
+      const subscriptions = [
+        audio.addListener("gesture", (event) => {
+          if (event.source === "call") listener({ type: "call-action", action: event.action });
+          else presses.press(event.presses);
+        }),
         audio.addListener("speech", () => listener({ type: "chunk-finished" })),
         audio.addListener("session", (event) =>
           listener({ type: "route", headphones: event.headphones }),
         ),
       ];
       return () => {
+        presses.dispose();
         for (const subscription of subscriptions) subscription.remove();
       };
     },

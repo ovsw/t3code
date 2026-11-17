@@ -5,6 +5,7 @@ import type { OrchestrationV2RunStatus } from "@t3tools/contracts";
 import type { WalkModeTurnItem, WalkModeTurns } from "./reply.ts";
 import {
   DEFAULT_WALK_MODE_SETTINGS,
+  WALK_MODE_AGREEMENT,
   WALK_MODE_RECORDING_LIMIT_MS,
   WALK_MODE_THINKING_INTERVAL_MS,
   WalkModeSession,
@@ -100,6 +101,7 @@ function fakeAudio(options: FakeAudioOptions = {}) {
     /** Calls since the last `take`, then forgets them. */
     take: () => calls.splice(0),
     press: (presses: 1 | 2 | 3) => emit({ type: "gesture", presses }),
+    pressTwice: (presses: 2 | 3) => emit({ type: "gesture-twice", presses }),
     callAction: (action: string) => emit({ type: "call-action", action }),
     headphones: (connected: boolean) => emit({ type: "route", headphones: connected }),
     /** Waits until an untaken call matches. */
@@ -331,6 +333,40 @@ describe("WalkModeSession: presses", () => {
     audio.press(1);
     expect(audio.take()).toEqual([["speak", ["The login works now.", "Try it again."]]]);
     expect(session.status).toBe("speaking");
+  });
+
+  it("previous twice reads again from the sentence before the current one", async () => {
+    const reply = turn("run-2", 2, "completed", "One. Two. Three.");
+    const { session, audio } = await startSession(thread([reply]));
+    audio.press(1);
+    audio.finishChunks(2);
+    audio.press(1);
+    audio.take();
+    audio.pressTwice(3);
+    expect(audio.take()).toEqual([["speak", ["Two.", "Three."]]]);
+    expect(session.status).toBe("speaking");
+    audio.pressTwice(3);
+    expect(audio.take()).toEqual([["speak", ["One.", "Two.", "Three."]]]);
+    audio.pressTwice(3);
+    expect(audio.take()).toEqual([["speak", ["One.", "Two.", "Three."]]]);
+  });
+
+  it("previous twice starts a loaded reply, repeats the last sentence once it ended, and errors with none", async () => {
+    const { session, audio } = await startSession(thread([latest]));
+    audio.take();
+    audio.pressTwice(3);
+    expect(audio.take()).toEqual([["speak", ["The login works now.", "Try it again."]]]);
+    audio.finishChunks(2);
+    expect(session.status).toBe("idle");
+    audio.pressTwice(3);
+    expect(audio.take()).toEqual([["speak", ["Try it again."]]]);
+    expect(session.status).toBe("speaking");
+
+    const empty = await startSession(thread([]));
+    empty.audio.take();
+    empty.audio.pressTwice(3);
+    expect(empty.audio.take()).toEqual([["playSound", "error"]]);
+    expect(empty.session.status).toBe("idle");
   });
 });
 
@@ -684,6 +720,18 @@ describe("WalkModeSession: sending", () => {
     expect(draft.text).toBe("");
     expect(session.status).toBe("paused");
     expect(audio.take()).toEqual([["playSound", "sent"]]);
+  });
+
+  it("next twice sends the agreement, leaves the draft alone, and starts the thinking tone", async () => {
+    const { session, audio, draft, sent } = await startSession(thread([latest]), {
+      draft: "Half a thought.",
+    });
+    audio.take();
+    audio.pressTwice(2);
+    await audio.until("playSound", "sent");
+    expect(sent).toEqual([withWalkModePrefix(WALK_MODE_AGREEMENT)]);
+    expect(draft.text).toBe("Half a thought.");
+    expect(session.status).toBe("paused");
   });
 
   it("a slash command is sent without the prefix", async () => {
