@@ -232,7 +232,8 @@ export function SettingsWalkModeRouteScreen() {
       ) : null}
       <Text className="px-2 text-sm text-foreground-muted">
         Walk mode reads replies in your headphones and records your answers by headphone presses.
-        Turn it on here or from the bar above the composer in a thread.
+        Turn it on here or from the bar above the composer in a thread. On a media remote, press
+        next twice quickly to agree with the suggestion, or previous twice to go back one sentence.
       </Text>
     </ScrollView>
   );

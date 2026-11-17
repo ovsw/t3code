@@ -15,7 +15,8 @@ public class T3WalkModeAudioModule: Module {
   private var configured = false
   private var speechDelegate: SpeechDelegate?
   private var remoteCommandsInstalled = false
-  private var pendingUtterances = 0
+  // stopSpeaking can still report didFinish for a cut-off utterance; only queued ones count.
+  private var queuedUtterances = Set<ObjectIdentifier>()
   private var nowPlayingTitle = "T3 Code"
   private var nowPlayingRate: Double = 0
   private let keepAliveEngine = AVAudioEngine()
@@ -37,15 +38,14 @@ public class T3WalkModeAudioModule: Module {
     Events("gesture", "speech", "session")
 
     OnCreate {
-      let delegate = SpeechDelegate(onChunkFinished: { [weak self] in
-        guard let self else { return }
+      let delegate = SpeechDelegate(onChunkFinished: { [weak self] utterance in
+        guard let self, self.queuedUtterances.remove(ObjectIdentifier(utterance)) != nil else { return }
         self.sendEvent("speech", ["type": "chunkFinished"])
-        self.pendingUtterances = max(0, self.pendingUtterances - 1)
-        if self.pendingUtterances == 0 { self.updateNowPlaying(rate: 0) }
+        if self.queuedUtterances.isEmpty { self.updateNowPlaying(rate: 0) }
       })
       self.speechDelegate = delegate
       self.synthesizer.delegate = delegate
-      let previewDelegate = SpeechDelegate(onChunkFinished: { [weak self] in
+      let previewDelegate = SpeechDelegate(onChunkFinished: { [weak self] _ in
         guard let self, !self.configured, !self.previewSynthesizer.isSpeaking else { return }
         self.releaseSession()
       })
@@ -75,11 +75,11 @@ public class T3WalkModeAudioModule: Module {
     }.runOnQueue(.main)
 
     AsyncFunction("speak") { (chunks: [String], voice: VoiceChoice) in
+      self.queuedUtterances.removeAll()
       self.synthesizer.stopSpeaking(at: .immediate)
-      self.pendingUtterances = 0
       self.queueUtterances(chunks, voice: voice)
       self.updateNowPlaying(rate: 1)
-    }
+    }.runOnQueue(.main)
 
     AsyncFunction("setNowPlayingTitle") { (title: String) in
       self.nowPlayingTitle = title
@@ -128,7 +128,7 @@ public class T3WalkModeAudioModule: Module {
     // Walk mode off: everything ends at once and other apps get the audio and buttons back.
     AsyncFunction("shutdown") {
       self.configured = false
-      self.pendingUtterances = 0
+      self.queuedUtterances.removeAll()
       self.synthesizer.stopSpeaking(at: .immediate)
       self.noticeSynthesizer.stopSpeaking(at: .immediate)
       self.previewSynthesizer.stopSpeaking(at: .immediate)
@@ -269,10 +269,10 @@ public class T3WalkModeAudioModule: Module {
   }
 
   private func queueUtterances(_ chunks: [String], voice: VoiceChoice) {
-    pendingUtterances += chunks.count
     for chunk in chunks {
       let utterance = Self.utterance(chunk, voice: voice)
       utterance.postUtteranceDelay = 0.25
+      queuedUtterances.insert(ObjectIdentifier(utterance))
       synthesizer.speak(utterance)
     }
   }
@@ -534,14 +534,14 @@ struct VoiceChoice: Record {
 }
 
 private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
-  private let onChunkFinished: () -> Void
+  private let onChunkFinished: (AVSpeechUtterance) -> Void
 
-  init(onChunkFinished: @escaping () -> Void) {
+  init(onChunkFinished: @escaping (AVSpeechUtterance) -> Void) {
     self.onChunkFinished = onChunkFinished
   }
 
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-    onChunkFinished()
+    onChunkFinished(utterance)
   }
 }
 

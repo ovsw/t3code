@@ -23,6 +23,10 @@ export type WalkModeEvent =
   | { readonly type: "press.single" }
   | { readonly type: "press.double" }
   | { readonly type: "press.triple" }
+  /** A media remote's next button pressed twice quickly. */
+  | { readonly type: "press.double.twice" }
+  /** A media remote's previous button pressed twice quickly. */
+  | { readonly type: "press.triple.twice" }
   | { readonly type: "reply.loaded" }
   /** `readWhilePaused` starts the reply even though the walker had paused the voice. */
   | { readonly type: "reply.arrived"; readonly readWhilePaused: boolean }
@@ -39,10 +43,14 @@ export type WalkModeEffect =
   | { readonly type: "speech.resume" }
   /** Reads the latest reply again; the host plays the error sound when there is none. */
   | { readonly type: "speech.replay" }
+  /** Reads again from the sentence before the current one. */
+  | { readonly type: "speech.back" }
   | { readonly type: "record.start" }
   | { readonly type: "record.stop" }
   /** Sends the composer draft; the host plays the error sound when it is empty. */
   | { readonly type: "send" }
+  /** Sends the fixed agreement message; the draft is left alone. */
+  | { readonly type: "send.agreement" }
   | { readonly type: "sound.error" };
 
 export type WalkModeStep = {
@@ -133,6 +141,35 @@ export function walkModeReducer(state: WalkModeState, event: WalkModeEvent): Wal
           };
         case "transcribing":
           return { state: { ...state, sendWhenDone: true }, effects: [] };
+      }
+      return assertNever(state);
+    }
+
+    case "press.double.twice": {
+      switch (state.kind) {
+        case "idle":
+        case "speaking":
+        case "paused":
+          return { state, effects: [{ type: "send.agreement" }] };
+        case "recording":
+        case "transcribing":
+          return stay;
+      }
+      return assertNever(state);
+    }
+
+    case "press.triple.twice": {
+      switch (state.kind) {
+        case "idle":
+        case "speaking":
+        case "paused":
+          return {
+            state: { kind: "speaking", hasSpeech: true },
+            effects: [{ type: "speech.back" }],
+          };
+        case "recording":
+        case "transcribing":
+          return stay;
       }
       return assertNever(state);
     }
